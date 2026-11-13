@@ -1,0 +1,15 @@
+<%@ page language="java" contentType="text/html; charset=UTF-8" pageEncoding="UTF-8"%>
+
+<footer class="fr6-footer mt-auto">
+    <div class="container-fluid px-4 text-center">
+        <div class="d-flex justify-content-between align-items-center flex-wrap">
+            <div>
+                <strong>N Logistic Import &amp; Export</strong> &bull; FR6 Analytics Dashboard Module (Java MVC2 / Tomcat 9 / MariaDB)
+            </div>
+            <div>
+                <span>Database: <code>n_logistic_db</code></span> &bull; 
+                <span>Author: Antigravity AI Developer</span>
+            </div>
+        </div>
+    </div>
+</footer>

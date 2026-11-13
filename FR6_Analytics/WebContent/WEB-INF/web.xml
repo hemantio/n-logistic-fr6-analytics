@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<web-app xmlns="http://xmlns.jcp.org/xml/ns/javaee"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://xmlns.jcp.org/xml/ns/javaee
+                             http://xmlns.jcp.org/xml/ns/javaee/web-app_4_0.xsd"
+         version="4.0">
+
+    <display-name>FR6_Analytics</display-name>
+    <description>FR6 Analytics Dashboard Module for N Logistic Platform</description>
+
+    <!-- 1. FR6.1 Analytics Dashboard Overview -->
+    <servlet>
+        <servlet-name>AnalyticsDashboardServlet</servlet-name>
+        <servlet-class>com.nlogistic.fr6.controller.AnalyticsDashboardServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>AnalyticsDashboardServlet</servlet-name>
+        <url-pattern>/fr6/analytics/dashboard</url-pattern>
+    </servlet-mapping>
+
+    <!-- 2. FR6.2 Sales Trend Analysis -->
+    <servlet>
+        <servlet-name>SalesTrendServlet</servlet-name>
+        <servlet-class>com.nlogistic.fr6.controller.SalesTrendServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>SalesTrendServlet</servlet-name>
+        <url-pattern>/fr6/analytics/sales-trends</url-pattern>
+    </servlet-mapping>
+
+    <!-- 3. FR6.3 ABC (Pareto) Classification -->
+    <servlet>
+        <servlet-name>AbcClassificationServlet</servlet-name>
+        <servlet-class>com.nlogistic.fr6.controller.AbcClassificationServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>AbcClassificationServlet</servlet-name>
+        <url-pattern>/fr6/analytics/abc-classification</url-pattern>
+    </servlet-mapping>
+
+    <!-- 4. FR6.4 Inventory Turnover Ratio -->
+    <servlet>
+        <servlet-name>InventoryTurnoverServlet</servlet-name>
+        <servlet-class>com.nlogistic.fr6.controller.InventoryTurnoverServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>InventoryTurnoverServlet</servlet-name>
+        <url-pattern>/fr6/analytics/inventory-turnover</url-pattern>
+    </servlet-mapping>
+
+    <!-- 5. FR6.5 Product Profitability & P&L -->
+    <servlet>
+        <servlet-name>ProfitabilityServlet</servlet-name>
+        <servlet-class>com.nlogistic.fr6.controller.ProfitabilityServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>ProfitabilityServlet</servlet-name>
+        <url-pattern>/fr6/analytics/profitability</url-pattern>
+    </servlet-mapping>
+
+    <!-- 6. FR6.6 Demand Forecasting & Pricing Multiplier -->
+    <servlet>
+        <servlet-name>DemandForecastServlet</servlet-name>
+        <servlet-class>com.nlogistic.fr6.controller.DemandForecastServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>DemandForecastServlet</servlet-name>
+        <url-pattern>/fr6/analytics/demand-forecast</url-pattern>
+    </servlet-mapping>
+
+    <!-- 7. FR6.7 Cached Analytics Refresh -->
+    <servlet>
+        <servlet-name>AnalyticsRefreshServlet</servlet-name>
+        <servlet-class>com.nlogistic.fr6.controller.AnalyticsRefreshServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>AnalyticsRefreshServlet</servlet-name>
+        <url-pattern>/fr6/analytics/refresh</url-pattern>
+    </servlet-mapping>
+
+    <session-config>
+        <session-timeout>30</session-timeout>
+        <cookie-config>
+            <http-only>true</http-only>
+        </cookie-config>
+    </session-config>
+
+    <welcome-file-list>
+        <welcome-file>index.jsp</welcome-file>
+    </welcome-file-list>
+
+</web-app>

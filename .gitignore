@@ -1,0 +1,19 @@
+# Build outputs
+*.class
+**/build/classes/
+**/WebContent/WEB-INF/classes/
+
+# Archives & logs
+*.zip
+*.log
+*.tmp
+*.bak
+
+# External reference / scratch folders (rooted at top-level only)
+/drawio/
+/fr6/
+
+# OS specific files
+Thumbs.db
+Desktop.ini
+.DS_Store
