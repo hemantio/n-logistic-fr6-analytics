@@ -1,161 +1,166 @@
 -- =============================================================================
 -- PROJECT: N Logistic Import & Export Platform
--- MODULE:  FR4 - STOCK & INVENTORY DETAILS (SRS v1.0 Section 3.4 & 7.6)
+-- MODULE:  FR4 - STOCK & INVENTORY MANAGEMENT (SRS v1.0 Section 7.6)
 -- FILE:    FR4_STOCK_DETAILS_FIXED.sql
 -- TARGET:  MySQL 8.0+ / MariaDB 10.4+ on XAMPP (Database: n_logistic_db)
--- SCOPE:   FR4.1 (Product/Stock Entry), FR4.2 (CSV Upload & Validation),
---          FR4.3 (Stock Reservation), FR4.4 (Shipment Stock Report),
---          FR4.5 (Inventory Ledger Audit), FR4.6 (Non-Negative Stock Rule),
---          FR4.7 (Stock Search, View & Reservation Locking)
+-- SCOPE:   STRICTLY IMPLEMENTS THE 4 OFFICIAL ENTITIES OF SRS SECTION 7.6:
+--            1. products (SRS Section 7.6 / ERD #14)
+--            2. stock (SRS Section 7.6 / ERD #15)
+--            3. inventory_ledger (SRS Section 7.6 / ERD #16)
+--            4. sales_transactions (SRS Section 7.6 / ERD #17)
+-- NOTE:    'companies', 'containers', and 'shipment' are referenced as foreign
+--          keys but are OWNED by FR1 (Section 7.3) and FR2/FR3 (Section 7.4).
 -- =============================================================================
-
-CREATE DATABASE IF NOT EXISTS `n_logistic_db`
-    DEFAULT CHARACTER SET utf8mb4
-    DEFAULT COLLATE utf8mb4_unicode_ci;
 
 USE `n_logistic_db`;
 
--- Preserve foreign key checks safety
 SET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS;
-SET FOREIGN_KEY_CHECKS = 1;
+SET FOREIGN_KEY_CHECKS = 0;
 
 -- =============================================================================
--- SECTION 1: MASTER & BASE SCHEMA PREREQUISITES
+-- SECTION 1: THE 4 CORE TABLES OF SRS SECTION 7.6
 -- =============================================================================
 
-CREATE TABLE IF NOT EXISTS `companies` (
-    `company_id`    INT AUTO_INCREMENT PRIMARY KEY,
-    `company_name`  VARCHAR(150) NOT NULL,
-    `company_type`  ENUM('SELLER','CONSUMER') NOT NULL,
-    `gst_number`    VARCHAR(20) UNIQUE,
-    `iec_code`      VARCHAR(15) NULL,
-    `address`       TEXT NULL,
-    `city`          VARCHAR(60) NULL,
-    `country`       VARCHAR(60) NULL,
-    `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS `containers` (
-    `container_id`      INT AUTO_INCREMENT PRIMARY KEY,
-    `container_number`  VARCHAR(15) NOT NULL UNIQUE,
-    `seller_id`         INT NOT NULL,
-    `container_type`    ENUM('DRY','REEFER','OPEN_TOP','TANK') NOT NULL,
-    `size_ft`           TINYINT NULL,
-    `status`            ENUM('AVAILABLE','ALLOCATED','IN_TRANSIT','MAINTENANCE') DEFAULT 'AVAILABLE',
-    `created_at`        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT `fk_fr4_container_seller` FOREIGN KEY (`seller_id`) REFERENCES `companies`(`company_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS `shipment` (
-    `shipment_id`   INT AUTO_INCREMENT PRIMARY KEY,
-    `shipment_no`   VARCHAR(20) NOT NULL UNIQUE,
-    `consumer_id`   INT NOT NULL,
-    `seller_id`     INT NOT NULL,
-    `container_id`  INT NOT NULL,
-    `status`        ENUM('BOOKED','LOADED','DEPARTED','IN_TRANSIT','ARRIVED','CUSTOMS_CLEARED','DELIVERED','CANCELLED') DEFAULT 'BOOKED',
-    `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT `fk_fr4_shipment_consumer` FOREIGN KEY (`consumer_id`) REFERENCES `companies`(`company_id`),
-    CONSTRAINT `fk_fr4_shipment_seller`   FOREIGN KEY (`seller_id`)   REFERENCES `companies`(`company_id`),
-    CONSTRAINT `fk_fr4_shipment_container`FOREIGN KEY (`container_id`)REFERENCES `containers`(`container_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- =============================================================================
--- SECTION 2: FR4 OPERATIONAL TABLES
--- =============================================================================
-
--- TABLE 1: PRODUCTS (SRS 7.6 / FR4.1, FR4.2)
+-- -----------------------------------------------------------------------------
+-- 1.1 PRODUCTS (SRS Section 7.6 / ERD #24)
+-- Catalog of goods managed by the Seller (FR4.1)
+-- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `products` (
     `product_id`        INT AUTO_INCREMENT PRIMARY KEY,
     `sku`               VARCHAR(40) NOT NULL UNIQUE COMMENT 'Stock Keeping Unit',
     `product_name`      VARCHAR(120) NOT NULL,
     `category`          VARCHAR(60) NULL,
-    `hs_code`           VARCHAR(12) NOT NULL COMMENT 'Customs Tariff Code',
-    `unit`              VARCHAR(20) NOT NULL COMMENT 'Piece, Box, kg, etc.',
-    `unit_weight_kg`    DECIMAL(8,3) NOT NULL DEFAULT 1.000,
-    `unit_price`        DECIMAL(12,2) NOT NULL DEFAULT 0.00,
-    `unit_cost`         DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT 'Cost of goods',
-    `owner_company_id`  INT NOT NULL COMMENT 'Seller company',
+    `hs_code`           VARCHAR(12) NOT NULL COMMENT 'Customs Tariff Code (HS Code)',
+    `unit`              VARCHAR(20) NOT NULL COMMENT 'Piece, Box, kg, Pallet',
+    `unit_weight_kg`    DECIMAL(8, 3) NOT NULL DEFAULT 1.000,
+    `unit_price`        DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    `unit_cost`         DECIMAL(12, 2) NOT NULL DEFAULT 0.00 COMMENT 'Cost of goods',
+    `owner_company_id`  INT NOT NULL COMMENT 'FK to companies (Seller)',
+    `is_active`         BOOLEAN NOT NULL DEFAULT TRUE COMMENT 'Soft delete flag',
     `created_at`        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT `fk_products_owner_company` FOREIGN KEY (`owner_company_id`) REFERENCES `companies`(`company_id`),
+
+    CONSTRAINT `fk_products_owner_company`
+        FOREIGN KEY (`owner_company_id`) REFERENCES `companies`(`company_id`)
+        ON DELETE RESTRICT ON UPDATE CASCADE,
+
     CONSTRAINT `chk_products_weight` CHECK (`unit_weight_kg` >= 0),
-    CONSTRAINT `chk_products_price` CHECK (`unit_price` >= 0),
-    CONSTRAINT `chk_products_cost` CHECK (`unit_cost` >= 0),
+    CONSTRAINT `chk_products_price`  CHECK (`unit_price` >= 0),
+    CONSTRAINT `chk_products_cost`   CHECK (`unit_cost` >= 0),
+
     INDEX `idx_products_sku` (`sku`),
-    INDEX `idx_products_owner` (`owner_company_id`)
+    INDEX `idx_products_owner` (`owner_company_id`),
+    INDEX `idx_products_active` (`is_active`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- TABLE 2: STOCK (SRS 7.6 / FR4.1, FR4.6, FR4.7)
+
+-- -----------------------------------------------------------------------------
+-- 1.2 STOCK (SRS Section 7.6 / ERD #15)
+-- Physical inventory quantity, allocations, and damaged stock (FR4.1, FR4.6)
+-- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `stock` (
     `stock_id`      INT AUTO_INCREMENT PRIMARY KEY,
     `product_id`    INT NOT NULL,
+    `shipment_id`   INT NULL COMMENT 'NULL until linked to active shipment',
+    `container_id`  INT NULL COMMENT 'Container allocated to this cargo',
     `quantity`      INT NOT NULL DEFAULT 0,
     `damaged_qty`   INT NOT NULL DEFAULT 0,
     `last_updated`  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT `fk_stock_product` FOREIGN KEY (`product_id`) REFERENCES `products`(`product_id`) ON DELETE CASCADE,
-    CONSTRAINT `chk_stock_qty_nonnegative` CHECK (`quantity` >= 0),
+
+    CONSTRAINT `fk_stock_product`
+        FOREIGN KEY (`product_id`) REFERENCES `products`(`product_id`)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+
+    CONSTRAINT `fk_stock_shipment`
+        FOREIGN KEY (`shipment_id`) REFERENCES `shipment`(`shipment_id`)
+        ON DELETE SET NULL ON UPDATE CASCADE,
+
+    CONSTRAINT `fk_stock_container`
+        FOREIGN KEY (`container_id`) REFERENCES `containers`(`container_id`)
+        ON DELETE SET NULL ON UPDATE CASCADE,
+
+    CONSTRAINT `chk_stock_qty_nonnegative`     CHECK (`quantity` >= 0),
     CONSTRAINT `chk_stock_damaged_nonnegative` CHECK (`damaged_qty` >= 0),
-    CONSTRAINT `chk_stock_damaged_lte_total` CHECK (`damaged_qty` <= `quantity`),
-    INDEX `idx_stock_product` (`product_id`)
+    CONSTRAINT `chk_stock_damaged_lte_total`   CHECK (`damaged_qty` <= `quantity`),
+
+    INDEX `idx_stock_product` (`product_id`),
+    INDEX `idx_stock_shipment` (`shipment_id`),
+    INDEX `idx_stock_container` (`container_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- TABLE 3: SHIPMENT ITEMS (SRS 7.4 / FR4.3)
-CREATE TABLE IF NOT EXISTS `shipment_items` (
-    `item_id`       INT AUTO_INCREMENT PRIMARY KEY,
-    `shipment_id`   INT NOT NULL,
-    `product_id`    INT NOT NULL,
-    `quantity`      INT NOT NULL,
-    `unit_price`    DECIMAL(12,2) NOT NULL DEFAULT 0.00,
-    `weight_kg`     DECIMAL(10,2) NULL,
-    `volume_cbm`    DECIMAL(8,2) NULL,
-    `amount`        DECIMAL(14,2) NOT NULL DEFAULT 0.00,
-    `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT `fk_si_shipment` FOREIGN KEY (`shipment_id`) REFERENCES `shipment`(`shipment_id`) ON DELETE CASCADE,
-    CONSTRAINT `fk_si_product`  FOREIGN KEY (`product_id`)  REFERENCES `products`(`product_id`),
-    CONSTRAINT `chk_si_quantity` CHECK (`quantity` > 0),
-    INDEX `idx_shipment_items_shipment` (`shipment_id`),
-    INDEX `idx_shipment_items_product`  (`product_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- TABLE 4: INVENTORY LEDGER (SRS 7.6 / FR4.5)
+-- -----------------------------------------------------------------------------
+-- 1.3 INVENTORY_LEDGER (SRS Section 7.6 / ERD #25)
+-- Immutable double-entry audit journal for all stock movements (FR4.5)
+-- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `inventory_ledger` (
     `ledger_id`       BIGINT AUTO_INCREMENT PRIMARY KEY,
     `stock_id`        INT NOT NULL,
     `product_id`      INT NOT NULL,
-    `txn_type`        ENUM('IN','OUT','DAMAGE','ADJUST','CLAIM_LOSS') NOT NULL,
-    `quantity`        INT NOT NULL,
-    `balance_after`   INT NOT NULL,
-    `reference_type`  VARCHAR(30) NULL COMMENT 'INITIAL_STOCK, SHIPMENT, ADJUSTMENT, etc.',
-    `reference_id`    BIGINT NULL,
+    `txn_type`        ENUM('IN', 'OUT', 'DAMAGE', 'ADJUST', 'CLAIM_LOSS') NOT NULL,
+    `quantity`        INT NOT NULL COMMENT 'Movement magnitude',
+    `balance_after`   INT NOT NULL COMMENT 'Running physical balance',
+    `reference_type`  VARCHAR(30) NULL COMMENT 'SHIPMENT, CLAIM, UPLOAD, MANUAL',
+    `reference_id`    BIGINT NULL COMMENT 'shipment_id, claim_id, etc.',
     `txn_time`        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT `fk_ledger_stock`   FOREIGN KEY (`stock_id`)   REFERENCES `stock`(`stock_id`),
-    CONSTRAINT `fk_ledger_product` FOREIGN KEY (`product_id`) REFERENCES `products`(`product_id`),
-    CONSTRAINT `chk_ledger_qty`    CHECK (`quantity` > 0),
-    CONSTRAINT `chk_ledger_bal`    CHECK (`balance_after` >= 0),
-    INDEX `idx_ledger_product` (`product_id`),
-    INDEX `idx_ledger_time` (`txn_time`),
-    INDEX `idx_ledger_stock` (`stock_id`)
+
+    CONSTRAINT `fk_ledger_stock`
+        FOREIGN KEY (`stock_id`) REFERENCES `stock`(`stock_id`)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+
+    CONSTRAINT `fk_ledger_product`
+        FOREIGN KEY (`product_id`) REFERENCES `products`(`product_id`)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+
+    CONSTRAINT `chk_ledger_qty` CHECK (`quantity` > 0),
+    CONSTRAINT `chk_ledger_bal` CHECK (`balance_after` >= 0),
+
+    INDEX `idx_ledger_product_time` (`product_id`, `txn_time`),
+    INDEX `idx_ledger_stock` (`stock_id`),
+    INDEX `idx_ledger_ref` (`reference_type`, `reference_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- TABLE 5: STOCK UPLOAD STAGING (FR4.2 CSV/EXCEL BATCH INTAKE)
-CREATE TABLE IF NOT EXISTS `stock_upload_staging` (
-    `row_id`         INT AUTO_INCREMENT PRIMARY KEY,
-    `sku`            VARCHAR(40) NULL,
-    `product_name`   VARCHAR(120) NULL,
-    `hs_code`        VARCHAR(12) NULL,
-    `unit`           VARCHAR(20) NULL,
-    `weight_text`    VARCHAR(30) NULL,
-    `price_text`     VARCHAR(30) NULL,
-    `quantity_text`  VARCHAR(30) NULL,
-    `row_status`     ENUM('PENDING','VALID','ERROR','IMPORTED') NOT NULL DEFAULT 'PENDING',
-    `error_message`  VARCHAR(255) NULL,
-    `created_at`     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    INDEX `idx_upload_sku` (`sku`),
-    INDEX `idx_upload_status` (`row_status`)
+
+-- -----------------------------------------------------------------------------
+-- 1.4 SALES_TRANSACTIONS (SRS Section 7.6 / ERD #23)
+-- Customer product purchases linked to confirmed shipments
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `sales_transactions` (
+    `sale_id`       BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `product_id`    INT NOT NULL,
+    `customer_id`   INT NOT NULL,
+    `shipment_id`   INT NULL,
+    `quantity`      INT NOT NULL,
+    `unit_price`    DECIMAL(12, 2) NOT NULL,
+    `total_amount`  DECIMAL(14, 2) NOT NULL,
+    `sale_date`     DATE NOT NULL,
+    `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT `fk_st_product`
+        FOREIGN KEY (`product_id`) REFERENCES `products`(`product_id`)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+
+    CONSTRAINT `fk_st_customer`
+        FOREIGN KEY (`customer_id`) REFERENCES `customers`(`customer_id`)
+        ON DELETE RESTRICT ON UPDATE CASCADE,
+
+    CONSTRAINT `fk_st_shipment`
+        FOREIGN KEY (`shipment_id`) REFERENCES `shipment`(`shipment_id`)
+        ON DELETE SET NULL ON UPDATE CASCADE,
+
+    CONSTRAINT `chk_st_quantity` CHECK (`quantity` > 0),
+    CONSTRAINT `chk_st_amount`   CHECK (`total_amount` >= 0),
+
+    INDEX `idx_sales_product` (`product_id`),
+    INDEX `idx_sales_customer` (`customer_id`),
+    INDEX `idx_sales_date` (`sale_date`),
+    INDEX `idx_sales_shipment` (`shipment_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+SET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;
 
 -- =============================================================================
--- SECTION 3: AUTOMATED INVENTORY LEDGER TRIGGERS (FR4.5)
+-- SECTION 2: AUTOMATED INVENTORY LEDGER TRIGGERS (FR4.5)
 -- =============================================================================
 
 DROP TRIGGER IF EXISTS `trg_stock_before_update`;
@@ -235,8 +240,6 @@ DROP PROCEDURE IF EXISTS `sp_shipment_stock_report`;
 DROP PROCEDURE IF EXISTS `sp_show_stock`;
 DROP PROCEDURE IF EXISTS `sp_search_stock`;
 DROP PROCEDURE IF EXISTS `sp_view_inventory_ledger`;
-DROP PROCEDURE IF EXISTS `sp_validate_stock_upload`;
-DROP PROCEDURE IF EXISTS `sp_import_valid_upload`;
 
 DELIMITER //
 
@@ -350,7 +353,6 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Stock record not found';
     END IF;
 
-    -- Calculate total booked/reserved quantity for this product in active shipments
     SELECT COALESCE(SUM(si.quantity), 0) INTO v_reserved
     FROM `shipment_items` si
     JOIN `shipment` sh ON sh.shipment_id = si.shipment_id
@@ -489,7 +491,6 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Insufficient available stock to complete booking';
     END IF;
 
-    -- SRS-compliant shipment item insertion (quantity, unit_price, weight, amount)
     INSERT INTO `shipment_items`
         (`shipment_id`, `product_id`, `quantity`, `unit_price`, `weight_kg`, `amount`)
     VALUES
@@ -560,7 +561,6 @@ CREATE PROCEDURE `sp_shipment_stock_report`(
     IN p_shipment_id INT
 )
 BEGIN
-    -- Detailed item lines
     SELECT
         sh.shipment_id,
         sh.shipment_no,
@@ -575,7 +575,6 @@ BEGIN
     JOIN `products` p ON p.product_id = si.product_id
     WHERE sh.shipment_id = p_shipment_id;
 
-    -- Aggregate totals
     SELECT
         sh.shipment_id,
         sh.shipment_no,
@@ -678,132 +677,4 @@ BEGIN
     ORDER BY l.txn_time DESC, l.ledger_id DESC;
 END//
 
--- -----------------------------------------------------------------------------
--- 4.11 CSV/EXCEL UPLOAD VALIDATION (FR4.2)
--- -----------------------------------------------------------------------------
-CREATE PROCEDURE `sp_validate_stock_upload`()
-BEGIN
-    -- Reset pending validation results
-    UPDATE `stock_upload_staging`
-    SET `row_status` = 'VALID', `error_message` = NULL
-    WHERE `row_status` <> 'IMPORTED';
-
-    -- Mandatory fields check
-    UPDATE `stock_upload_staging`
-    SET `row_status` = 'ERROR',
-        `error_message` = 'Mandatory fields are missing'
-    WHERE `row_status` = 'VALID'
-      AND (
-        sku IS NULL OR TRIM(sku) = ''
-        OR product_name IS NULL OR TRIM(product_name) = ''
-        OR hs_code IS NULL OR TRIM(hs_code) = ''
-        OR unit IS NULL OR TRIM(unit) = ''
-        OR weight_text IS NULL OR TRIM(weight_text) = ''
-        OR price_text IS NULL OR TRIM(price_text) = ''
-        OR quantity_text IS NULL OR TRIM(quantity_text) = ''
-      );
-
-    -- Numeric format validation
-    UPDATE `stock_upload_staging`
-    SET `row_status` = 'ERROR',
-        `error_message` = 'Invalid numeric format for weight, price, or quantity'
-    WHERE `row_status` = 'VALID'
-      AND (
-        TRIM(weight_text) NOT REGEXP '^[0-9]+([.][0-9]+)?$'
-        OR TRIM(price_text) NOT REGEXP '^[0-9]+([.][0-9]+)?$'
-        OR TRIM(quantity_text) NOT REGEXP '^[0-9]+$'
-      );
-
-    -- Non-negative and limit validation
-    UPDATE `stock_upload_staging`
-    SET `row_status` = 'ERROR',
-        `error_message` = 'Quantity must be positive; weight and price must be non-negative'
-    WHERE `row_status` = 'VALID'
-      AND (
-        CAST(weight_text AS DECIMAL(12,3)) > 99999.999
-        OR CAST(price_text AS DECIMAL(14,2)) > 9999999999.99
-        OR CAST(quantity_text AS UNSIGNED) = 0
-        OR CAST(quantity_text AS UNSIGNED) > 2147483647
-      );
-
-    -- Duplicate SKU check against existing product catalog
-    UPDATE `stock_upload_staging` u
-    JOIN `products` p ON p.sku = u.sku
-    SET u.row_status = 'ERROR',
-        u.error_message = 'SKU already exists in catalog'
-    WHERE u.row_status = 'VALID';
-
-    -- Duplicate SKU check inside staging file
-    UPDATE `stock_upload_staging` u
-    JOIN (
-        SELECT sku FROM `stock_upload_staging`
-        WHERE sku IS NOT NULL AND TRIM(sku) <> '' AND row_status <> 'IMPORTED'
-        GROUP BY sku HAVING COUNT(*) > 1
-    ) d ON d.sku = u.sku
-    SET u.row_status = 'ERROR',
-        u.error_message = 'Duplicate SKU inside uploaded file'
-    WHERE u.row_status = 'VALID';
-
-    -- Display row-level validation report (FR4.2)
-    SELECT `row_id`, `sku`, `product_name`, `row_status`, `error_message`
-    FROM `stock_upload_staging`
-    ORDER BY `row_id`;
-END//
-
--- -----------------------------------------------------------------------------
--- 4.12 IMPORT VALID CSV UPLOAD ROWS (FR4.2)
--- -----------------------------------------------------------------------------
-CREATE PROCEDURE `sp_import_valid_upload`(
-    IN p_owner_company_id INT
-)
-BEGIN
-    DECLARE EXIT HANDLER FOR SQLEXCEPTION
-    BEGIN
-        ROLLBACK;
-        RESIGNAL;
-    END;
-
-    START TRANSACTION;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM `companies` WHERE `company_id` = p_owner_company_id AND `company_type` = 'SELLER'
-    ) THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Valid seller company not found';
-    END IF;
-
-    -- Import new valid products
-    INSERT INTO `products`
-        (`sku`, `product_name`, `hs_code`, `unit`, `unit_weight_kg`, `unit_price`, `owner_company_id`)
-    SELECT
-        TRIM(sku), TRIM(product_name), TRIM(hs_code), TRIM(unit),
-        CAST(weight_text AS DECIMAL(8,3)),
-        CAST(price_text AS DECIMAL(12,2)),
-        p_owner_company_id
-    FROM `stock_upload_staging`
-    WHERE `row_status` = 'VALID';
-
-    -- Import corresponding stock
-    INSERT INTO `stock` (`product_id`, `quantity`, `damaged_qty`)
-    SELECT
-        p.product_id,
-        CAST(u.quantity_text AS UNSIGNED),
-        0
-    FROM `stock_upload_staging` u
-    JOIN `products` p ON p.sku = u.sku
-    WHERE u.row_status = 'VALID';
-
-    -- Mark imported records
-    UPDATE `stock_upload_staging`
-    SET `row_status` = 'IMPORTED', `error_message` = NULL
-    WHERE `row_status` = 'VALID';
-
-    COMMIT;
-
-    SELECT 'Import completed successfully' AS result, COUNT(*) AS imported_rows
-    FROM `stock_upload_staging` WHERE `row_status` = 'IMPORTED';
-END//
-
 DELIMITER ;
-
--- Restore foreign key checks
-SET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;
