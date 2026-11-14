@@ -89,7 +89,6 @@ CREATE TABLE IF NOT EXISTS `shipment_costs` (
     `description` VARCHAR(255) NULL,
     `cost_date` DATE NOT NULL,
     `recorded_by` INT NULL,
-    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT `chk_fr6_shipment_cost_nonnegative` CHECK (`amount` >= 0.00),
     CONSTRAINT `fk_fr6_shipment_cost_shipment` FOREIGN KEY (`shipment_id`)
         REFERENCES `shipment`(`shipment_id`) ON DELETE RESTRICT ON UPDATE CASCADE,
@@ -98,16 +97,18 @@ CREATE TABLE IF NOT EXISTS `shipment_costs` (
     INDEX `idx_fr6_shipment_cost_date` (`shipment_id`, `cost_date`, `cost_type`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Ensure shipment_stock_reservations exists for available inventory calculations
+-- Ensure shipment_stock_reservations exists for operational reservation tracking
 CREATE TABLE IF NOT EXISTS `shipment_stock_reservations` (
     `reservation_id` BIGINT AUTO_INCREMENT PRIMARY KEY,
     `shipment_id` INT NOT NULL,
-    `product_id` INT NOT NULL,
-    `reserved_quantity` INT NOT NULL,
+    `shipment_item_id` INT NOT NULL,
+    `stock_id` INT NOT NULL,
+    `quantity_reserved` INT NOT NULL,
     `status` ENUM('RESERVED','CONSUMED','RELEASED') NOT NULL DEFAULT 'RESERVED',
-    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    INDEX `idx_ssr_prod_status` (`product_id`, `status`),
-    INDEX `idx_ssr_shipment` (`shipment_id`)
+    `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX `idx_ssr_stock_status` (`stock_id`, `status`),
+    INDEX `idx_ssr_shipment` (`shipment_id`),
+    INDEX `idx_ssr_item` (`shipment_item_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
@@ -124,7 +125,6 @@ CREATE TABLE IF NOT EXISTS `sales_trend_result` (
     `total_sales` DECIMAL(14,2) NOT NULL DEFAULT 0.00,
     `total_qty` INT NOT NULL DEFAULT 0,
     `growth_pct` DECIMAL(6,2) NOT NULL DEFAULT 0.00,
-    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT `fk_fr6_sales_origin_port` FOREIGN KEY (`origin_port_id`) REFERENCES `ports`(`port_id`) ON DELETE SET NULL,
     CONSTRAINT `fk_fr6_sales_dest_port` FOREIGN KEY (`dest_port_id`) REFERENCES `ports`(`port_id`) ON DELETE SET NULL,
     CONSTRAINT `chk_fr6_sales_total_nonnegative` CHECK (`total_sales` >= 0.00 AND `total_qty` >= 0)
@@ -137,7 +137,6 @@ CREATE TABLE IF NOT EXISTS `abc_classification_result` (
     `cumulative_pct` DECIMAL(5,2) NOT NULL DEFAULT 0.00,
     `abc_class` CHAR(1) NOT NULL,
     `calculated_on` DATE NOT NULL,
-    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT `fk_fr6_abc_product` FOREIGN KEY (`product_id`) REFERENCES `products`(`product_id`) ON DELETE CASCADE,
     CONSTRAINT `chk_fr6_abc_class` CHECK (`abc_class` IN ('A','B','C')),
     CONSTRAINT `chk_fr6_abc_pct` CHECK (`cumulative_pct` BETWEEN 0.00 AND 100.00)
@@ -151,7 +150,6 @@ CREATE TABLE IF NOT EXISTS `inventory_turnover_result` (
     `cogs` DECIMAL(14,2) NOT NULL DEFAULT 0.00,
     `avg_inventory` DECIMAL(14,2) NOT NULL DEFAULT 0.00,
     `turnover_ratio` DECIMAL(8,2) NOT NULL DEFAULT 0.00,
-    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT `fk_fr6_turnover_product` FOREIGN KEY (`product_id`) REFERENCES `products`(`product_id`) ON DELETE CASCADE,
     CONSTRAINT `chk_fr6_turnover_dates` CHECK (`period_start` <= `period_end`),
     CONSTRAINT `chk_fr6_turnover_values` CHECK (`cogs` >= 0.00 AND `avg_inventory` >= 0.00 AND `turnover_ratio` >= 0.00)
@@ -164,7 +162,6 @@ CREATE TABLE IF NOT EXISTS `profitability_result` (
     `revenue` DECIMAL(14,2) NOT NULL DEFAULT 0.00,
     `cost` DECIMAL(14,2) NOT NULL DEFAULT 0.00,
     `margin_pct` DECIMAL(6,2) NOT NULL DEFAULT 0.00,
-    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT `fk_fr6_profitability_product` FOREIGN KEY (`product_id`) REFERENCES `products`(`product_id`) ON DELETE CASCADE,
     CONSTRAINT `chk_fr6_profitability_values` CHECK (`revenue` >= 0.00 AND `cost` >= 0.00)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -183,7 +180,6 @@ CREATE TABLE IF NOT EXISTS `profit_loss` (
     `claim_loss` DECIMAL(14,2) NOT NULL DEFAULT 0.00,
     `net_profit` DECIMAL(14,2) GENERATED ALWAYS AS
         (`revenue` - `freight_cost` - `port_cost` - `handling_cost` - `claim_loss`) STORED,
-    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT `fk_fr6_pl_shipment` FOREIGN KEY (`shipment_id`) REFERENCES `shipment`(`shipment_id`) ON DELETE SET NULL,
     CONSTRAINT `fk_fr6_pl_seller_company` FOREIGN KEY (`seller_id`) REFERENCES `companies`(`company_id`) ON DELETE RESTRICT,
     CONSTRAINT `chk_fr6_pl_amounts` CHECK (`revenue` >= 0 AND `freight_cost` >= 0 AND `port_cost` >= 0 AND `handling_cost` >= 0 AND `claim_loss` >= 0),
@@ -222,7 +218,6 @@ CREATE TABLE IF NOT EXISTS `demand_forecast` (
     `predicted_bookings` INT NOT NULL DEFAULT 0,
     `confidence_pct` DECIMAL(5,2) NOT NULL DEFAULT 0.00,
     `suggested_multiplier` DECIMAL(4,2) NOT NULL DEFAULT 1.00,
-    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT `fk_fr6_df_origin` FOREIGN KEY (`origin_port_id`) REFERENCES `ports`(`port_id`) ON DELETE CASCADE,
     CONSTRAINT `fk_fr6_df_dest` FOREIGN KEY (`dest_port_id`) REFERENCES `ports`(`port_id`) ON DELETE CASCADE,
     CONSTRAINT `chk_fr6_df_values` CHECK (`predicted_bookings` >= 0 AND `confidence_pct` BETWEEN 0 AND 100 AND `suggested_multiplier` > 0)
@@ -236,7 +231,6 @@ CREATE TABLE IF NOT EXISTS `customer_abc_classification_result` (
     `cumulative_pct` DECIMAL(5,2) NOT NULL DEFAULT 0.00,
     `abc_class` CHAR(1) NOT NULL,
     `calculated_on` DATE NOT NULL,
-    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT `fk_fr6_customer_abc_customer` FOREIGN KEY (`customer_id`) REFERENCES `customers`(`customer_id`) ON DELETE CASCADE,
     CONSTRAINT `chk_fr6_customer_abc_class` CHECK (`abc_class` IN ('A','B','C')),
     CONSTRAINT `chk_fr6_customer_abc_pct` CHECK (`cumulative_pct` BETWEEN 0 AND 100)
@@ -249,7 +243,6 @@ CREATE TABLE IF NOT EXISTS `sales_trend_product_result` (
     `total_sales` DECIMAL(14,2) NOT NULL DEFAULT 0.00,
     `total_qty` INT NOT NULL DEFAULT 0,
     `growth_pct` DECIMAL(6,2) NOT NULL DEFAULT 0.00,
-    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT `fk_fr6_st_product` FOREIGN KEY (`product_id`) REFERENCES `products`(`product_id`) ON DELETE CASCADE,
     CONSTRAINT `chk_fr6_st_product_values` CHECK (`total_sales` >= 0 AND `total_qty` >= 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -261,7 +254,6 @@ CREATE TABLE IF NOT EXISTS `sales_trend_customer_result` (
     `total_sales` DECIMAL(14,2) NOT NULL DEFAULT 0.00,
     `total_qty` INT NOT NULL DEFAULT 0,
     `growth_pct` DECIMAL(6,2) NOT NULL DEFAULT 0.00,
-    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT `fk_fr6_st_customer` FOREIGN KEY (`customer_id`) REFERENCES `customers`(`customer_id`) ON DELETE CASCADE,
     CONSTRAINT `chk_fr6_st_customer_values` CHECK (`total_sales` >= 0 AND `total_qty` >= 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -274,11 +266,53 @@ CREATE TABLE IF NOT EXISTS `shipment_profitability_result` (
     `revenue` DECIMAL(14,2) NOT NULL DEFAULT 0.00,
     `cost` DECIMAL(14,2) NOT NULL DEFAULT 0.00,
     `margin_pct` DECIMAL(6,2) NOT NULL DEFAULT 0.00,
-    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT `fk_fr6_ship_profit_shipment` FOREIGN KEY (`shipment_id`) REFERENCES `shipment`(`shipment_id`) ON DELETE CASCADE,
     CONSTRAINT `fk_fr6_ship_profit_seller` FOREIGN KEY (`seller_id`) REFERENCES `companies`(`company_id`) ON DELETE RESTRICT,
     CONSTRAINT `chk_fr6_ship_profit_values` CHECK (`revenue` >= 0 AND `cost` >= 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Drop created_at from any existing FR6 result tables
+DROP PROCEDURE IF EXISTS `sp_fr6_remove_created_at`;
+DELIMITER $$
+CREATE PROCEDURE `sp_fr6_remove_created_at`()
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'sales_trend_result' AND column_name = 'created_at') THEN
+        ALTER TABLE sales_trend_result DROP COLUMN created_at;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'abc_classification_result' AND column_name = 'created_at') THEN
+        ALTER TABLE abc_classification_result DROP COLUMN created_at;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'inventory_turnover_result' AND column_name = 'created_at') THEN
+        ALTER TABLE inventory_turnover_result DROP COLUMN created_at;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'profitability_result' AND column_name = 'created_at') THEN
+        ALTER TABLE profitability_result DROP COLUMN created_at;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'profit_loss' AND column_name = 'created_at') THEN
+        ALTER TABLE profit_loss DROP COLUMN created_at;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'demand_forecast' AND column_name = 'created_at') THEN
+        ALTER TABLE demand_forecast DROP COLUMN created_at;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'customer_abc_classification_result' AND column_name = 'created_at') THEN
+        ALTER TABLE customer_abc_classification_result DROP COLUMN created_at;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'sales_trend_product_result' AND column_name = 'created_at') THEN
+        ALTER TABLE sales_trend_product_result DROP COLUMN created_at;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'sales_trend_customer_result' AND column_name = 'created_at') THEN
+        ALTER TABLE sales_trend_customer_result DROP COLUMN created_at;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'shipment_profitability_result' AND column_name = 'created_at') THEN
+        ALTER TABLE shipment_profitability_result DROP COLUMN created_at;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'shipment_costs' AND column_name = 'created_at') THEN
+        ALTER TABLE shipment_costs DROP COLUMN created_at;
+    END IF;
+END$$
+DELIMITER ;
+CALL `sp_fr6_remove_created_at`();
+DROP PROCEDURE IF EXISTS `sp_fr6_remove_created_at`;
 
 -- Normalize seller_id FKs to companies.company_id. Shipment.seller_id is a company_id.
 -- Drop an incorrect FK first (if an earlier draft pointed seller_id at users),
@@ -551,25 +585,22 @@ SELECT
     c.company_id AS seller_id, c.company_name AS seller_name,
     COALESCE(stk.on_hand_qty,0) AS on_hand_qty,
     COALESCE(stk.damaged_qty,0) AS damaged_qty,
-    COALESCE(res.reserved_qty,0) AS reserved_qty,
-    COALESCE(stk.on_hand_qty,0) - COALESCE(stk.damaged_qty,0) - COALESCE(res.reserved_qty,0) AS available_qty,
+    COALESCE(stk.reserved_qty,0) AS reserved_qty,
+    COALESCE(stk.on_hand_qty,0) - COALESCE(stk.damaged_qty,0) - COALESCE(stk.reserved_qty,0) AS available_qty,
     p.unit_price, p.unit_cost,
     ROUND((COALESCE(stk.on_hand_qty,0) - COALESCE(stk.damaged_qty,0)) * p.unit_price,2) AS market_value,
     ROUND((COALESCE(stk.on_hand_qty,0) - COALESCE(stk.damaged_qty,0)) * p.unit_cost,2) AS cost_value
 FROM products p
 JOIN companies c ON c.company_id = p.owner_company_id
 LEFT JOIN (
-    SELECT product_id, SUM(quantity) AS on_hand_qty,
-           SUM(damaged_qty) AS damaged_qty
+    SELECT product_id, 
+           SUM(quantity) AS on_hand_qty,
+           SUM(damaged_qty) AS damaged_qty,
+           SUM(reserved_qty) AS reserved_qty
     FROM stock
+    WHERE is_active = TRUE
     GROUP BY product_id
-) stk ON stk.product_id = p.product_id
-LEFT JOIN (
-    SELECT product_id, SUM(reserved_quantity) AS reserved_qty
-    FROM shipment_stock_reservations
-    WHERE status = 'RESERVED'
-    GROUP BY product_id
-) res ON res.product_id = p.product_id;
+) stk ON stk.product_id = p.product_id;
 
 -- Live shipment profitability uses actual payment, shipment-cost and settled-claim data.
 -- Seller id is company_id, matching shipment.seller_id.
@@ -637,7 +668,7 @@ CREATE OR REPLACE VIEW `vw_fr6_demand_forecast_live` AS
 SELECT df.forecast_id, df.origin_port_id, op.port_name AS origin, op.port_code AS origin_code,
        df.dest_port_id, dp.port_name AS destination, dp.port_code AS destination_code,
        df.container_type, df.forecast_month, df.predicted_bookings,
-       df.confidence_pct, df.suggested_multiplier, df.created_at
+       df.confidence_pct, df.suggested_multiplier
 FROM demand_forecast df
 JOIN ports op ON op.port_id = df.origin_port_id
 JOIN ports dp ON dp.port_id = df.dest_port_id;
