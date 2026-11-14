@@ -322,19 +322,22 @@ BEGIN
         s.shipment_id,
         s.seller_id,
         DATE_FORMAT(s.created_at, '%Y-%m-01') AS period_month,
-        COALESCE(bi.total_amount, s.quoted_price) AS revenue,
-        COALESCE(pr.base_rate, 45000.00) AS freight_cost,
+        COALESCE(MAX(bi.total_amount), s.quoted_price, 0.00) AS revenue,
+        COALESCE(AVG(pr.base_rate), 45000.00) AS freight_cost,
         5000.00 AS port_cost,
         3500.00 AS handling_cost,
-        COALESCE((SELECT SUM(c.claimed_amount) FROM claims c WHERE c.shipment_id = s.shipment_id AND c.status = 'APPROVED'), 0.00) AS claim_loss,
-        (COALESCE(bi.total_amount, s.quoted_price) - COALESCE(pr.base_rate, 45000.00) - 5000.00 - 3500.00 
-         - COALESCE((SELECT SUM(c.claimed_amount) FROM claims c WHERE c.shipment_id = s.shipment_id AND c.status = 'APPROVED'), 0.00)
+        COALESCE((SELECT SUM(CASE WHEN c.approved_amount > 0 THEN c.approved_amount ELSE c.claimed_amount END) FROM claims c WHERE c.shipment_id = s.shipment_id AND c.status IN ('APPROVED', 'SETTLED')), 0.00) AS claim_loss,
+        (COALESCE(MAX(bi.total_amount), s.quoted_price, 0.00) 
+         - COALESCE(AVG(pr.base_rate), 45000.00) 
+         - 5000.00 
+         - 3500.00 
+         - COALESCE((SELECT SUM(CASE WHEN c.approved_amount > 0 THEN c.approved_amount ELSE c.claimed_amount END) FROM claims c WHERE c.shipment_id = s.shipment_id AND c.status IN ('APPROVED', 'SETTLED')), 0.00)
         ) AS net_profit
     FROM shipment s
     LEFT JOIN billing_invoices bi ON s.shipment_id = bi.shipment_id
     LEFT JOIN pricing_rules pr ON s.origin_port_id = pr.origin_port_id AND s.dest_port_id = pr.dest_port_id
     WHERE s.status != 'CANCELLED'
-    GROUP BY s.shipment_id, s.seller_id, DATE_FORMAT(s.created_at, '%Y-%m-01'), bi.total_amount, s.quoted_price, pr.base_rate;
+    GROUP BY s.shipment_id, s.seller_id, DATE_FORMAT(s.created_at, '%Y-%m-01');
 END //
 
 
@@ -463,87 +466,174 @@ ORDER BY st.period_month DESC, st.total_sales DESC;
 
 
 -- =============================================================================
--- SECTION 4: STANDARD CRUD OPERATIONS FOR MODULE FR6 (EVALUATION / VIVA)
--- =============================================================================
--- NOTE: In an Analytics & P&L module (SRS 7.9), CRUD operates on materialized 
--- analytical result sets and reporting caches rather than primary transactional rows.
 
+-- =============================================================================
+-- SECTION 4: SRS ROLE-BASED ACCESS & MODULE-SPECIFIC LIFECYCLE STANDARDS
+-- =============================================================================
 /*
+===============================================================================
+1. ROLE-BASED TASK & ACCESS CONTROL MATRIX (SRS Section 2.3 & FR6)
+-------------------------------------------------------------------------------
+ROLE        ALLOWED ANALYTICAL OPERATIONS & TASKS                RESTRICTIONS
+----------  ---------------------------------------------------  --------------
+ADMIN       - View system-wide Executive KPIs (vw_fr6_executive_kpis) Cannot alter
+            - View cross-company route performance & trade lanes historical sales
+            - Run system-wide analytics refresh (sp_refresh_all) without audit log
+            - Purge aged analytics cache (> 24 months retention)
+            - Manage ports (is_active) and vessels (status='MAINTENANCE')
+
+SELLER      - View own company monthly & shipment P&L (FR2.7)     CANNOT view other
+(Exporter)  - Export own company P&L records to CSV (FR2.9)      competing sellers'
+            - View ABC Pareto inventory classification for own    P&L or profit
+              catalog products (FR6.3)                            margins.
+            - View product-level profit margins & COGS (FR6.5)
+            - Run on-demand P&L recalculation for own company
+
+CONSUMER    - View own shipment tracking timeline & delay flags  STRICTLY RESTRICTED
+            - View billing invoices & record payments (FR5.3)    from all seller P&L,
+            - File loss/damage claims within 30 days (FR7.1)     operating margins,
+                                                                 and cost breakdowns.
+
+-------------------------------------------------------------------------------
+2. CROSS-MODULE LIFECYCLE & 'DELETE VS. DEACTIVATE' MAPPING INTO FR6
+-------------------------------------------------------------------------------
+ENTITY/MODULE  SRS ACTION               LIFECYCLE & DEACTIVATE POLICY      EFFECT ON FR6 ANALYTICS
+-------------  -----------------------  ---------------------------------  -----------------------------------
+Users (FR1)    Admin manages users      Soft Deactivate:                   Deactivated users disappear from active
+               (FR1.4)                  UPDATE users SET status='INACTIVE' counts but their historical bookings,
+                                        ❌ No hard delete allowed           payments, and audit logs remain intact.
+
+Ports (FR1)    Admin manages ports      Soft Deactivate:                   Deactivated ports cannot receive new
+               (FR1.6)                  UPDATE ports SET is_active=FALSE   bookings; historical route sales trends
+                                        ❌ No hard delete allowed           (sales_trend_result) are preserved.
+
+Vessels (FR1)  Admin manages ships      Status Maintenance:               Vessels undergoing maintenance cannot be
+               (FR1.7)                  UPDATE vessels SET status='MAINT'  assigned to new voyages; historical
+                                        ❌ No hard delete allowed           freight cost records are preserved.
+
+Shipment (FR2) Seller updates sequence  Soft Cancel before departure:      CANCELLED shipments are strictly excluded
+               (FR2.2)                  UPDATE shipment SET                from revenue & P&L calculations
+                                        status='CANCELLED'                 (s.status != 'CANCELLED'). DELIVERED
+                                        ❌ No hard delete allowed           shipments release containers & close KPIs.
+
+Pricing (FR3)  Seller updates rates     Soft Deactivate:                   Deactivated rules cannot generate new
+               (FR3.6)                  UPDATE pricing_rules SET           quotes; pricing_audit preserves historical
+                                        is_active=FALSE                    rates for past P&L freight cost audits.
+
+Stock (FR4)    Seller manages goods     Soft Delete & Ledger Adjustment:   Zeroed stock with 'ADJUST' ledger entries
+               (FR4.1, FR4.5, FR4.6)    UPDATE products SET is_active=FALSE feeds inventory turnover (COGS/avg stock).
+                                        CHECK(quantity >= 0) non-negative  Negative stock is blocked by DB constraints.
+
+Billing (FR5)  Consumer records payment Strict Financial Lock:             Payment inserts automatically update paid
+               (FR5.3, FR5.4)           ❌ Never delete invoices/payments  amount; instantly reflected in collected
+                                        Adjust via credit notes/claims     revenue KPI and recognized P&L revenue.
+
+Claims (FR7)   Seller reviews & settles Status Settlement:                 SETTLED claims automatically post approved
+               (FR7.4, FR7.6)           status='APPROVED' / 'SETTLED'      amounts to profit_loss.claim_loss and
+                                        ❌ No hard delete allowed           directly reduce net_profit (FR2.8/FR7.6).
+
+Analytics      System/Admin refresh     Materialized Cache Invalidation:   Analytical result tables do NOT use soft
+Results (FR6)  (FR6.7)                  Truncate/Refresh via procedures    delete; they are atomically refreshed or
+                                        Purge via retention window         purged after the retention threshold.
+===============================================================================
+*/
+
+
+-- =============================================================================
+-- SECTION 5: PARAMETERIZED CRUD & DAO QUERIES FOR MODULE FR6 (JAVA PREPAREDSTATEMENT)
+-- =============================================================================
+/*
+The following SQL queries map directly to the Java DAO layer (AnalyticsDAO.java,
+ProfitLossDAO.java) for implementation in the MVC2 architecture.
+
 -- -----------------------------------------------------------------------------
 -- [C - CREATE / CALCULATE]
 -- Generate/Materialize analytical snapshots across all 5 tables from live OLTP data:
 -- -----------------------------------------------------------------------------
--- Option 1: Master Atomic Calculation (Refreshes all 5 tables in 1 transaction)
+-- 1. Master Atomic Recalculation (Executes all 5 analytical algorithms in 1 transaction)
 CALL sp_refresh_all_fr6_analytics();
 
--- Option 2: Modular On-Demand Calculation
+-- 2. Modular Procedure Recalculation
 CALL sp_refresh_sales_trends();
 CALL sp_calculate_abc_classification();
 CALL sp_calculate_inventory_turnover('2026-01-01', '2026-12-31');
 CALL sp_calculate_profitability();
 CALL sp_calculate_profit_loss();
 
--- Option 3: Manual Direct Insert (e.g. Budget Target or Adjusted P&L Baseline)
-INSERT INTO profit_loss (shipment_id, seller_id, period_month, revenue, freight_cost, port_cost, handling_cost, claim_loss, net_profit)
-VALUES (NULL, 1, '2026-12-01', 500000.00, 180000.00, 25000.00, 15000.00, 0.00, 280000.00);
+-- 3. Direct Target / Budget Baseline Insertion
+-- INSERT INTO profit_loss (shipment_id, seller_id, period_month, revenue, freight_cost, port_cost, handling_cost, claim_loss, net_profit)
+-- VALUES (NULL, ?, ?, ?, ?, ?, ?, 0.00, ?);
 
 
 -- -----------------------------------------------------------------------------
 -- [R - READ / VIEW]
--- Multi-dimensional slicing and dicing across routes, sellers, and date ranges:
+-- Role-scoped multi-dimensional queries (Admin vs Seller):
 -- -----------------------------------------------------------------------------
--- 1. Read Executive KPI Dashboard
-SELECT * FROM vw_fr6_executive_kpis;
+-- 1. ADMIN: View System-wide Executive KPI Dashboard (FR6.1)
+-- SELECT active_shipments_count, available_containers_count, total_revenue_collected,
+--        pending_invoices_amount, open_claims_count
+-- FROM vw_fr6_executive_kpis;
 
--- 2. Read Seller P&L breakdown for specific month or seller
-SELECT * FROM vw_fr6_seller_pl_summary 
-WHERE seller_id = 1 AND period_month >= '2026-01-01';
+-- 2. SELLER: View Own Monthly P&L Breakdown with Date Range Filter (FR2.7, FR2.9, FR6.5)
+-- SELECT period_month, seller_id, seller_name, total_shipments_billed, total_gross_revenue,
+--        total_freight_cost, total_port_cost, total_handling_cost, total_claim_deductions,
+--        net_operating_profit, profit_margin_pct
+-- FROM vw_fr6_seller_pl_summary
+-- WHERE seller_id = ? AND period_month BETWEEN ? AND ?
+-- ORDER BY period_month DESC;
 
--- 3. Read High-Priority Class 'A' Inventory requiring tight warehouse control
-SELECT * FROM vw_fr6_abc_inventory_analysis 
-WHERE abc_class = 'A';
+-- 3. SELLER: View Own Product Pareto ABC Classification (FR6.3)
+-- SELECT p.sku, p.product_name, p.category, abc.annual_value, abc.cumulative_pct,
+--        abc.abc_class, abc.calculated_on
+-- FROM abc_classification_result abc
+-- JOIN products p ON abc.product_id = p.product_id
+-- WHERE p.owner_company_id = ? AND abc.abc_class = ?
+-- ORDER BY abc.annual_value DESC;
 
--- 4. Read Top-Performing Trade Routes with positive growth
-SELECT * FROM vw_fr6_route_performance 
-WHERE trend_direction = 'EXPANDING';
+-- 4. SELLER / ADMIN: View Trade Route Performance & Growth Trends (FR6.2)
+-- SELECT period_month, origin_port, origin_code, destination_port, destination_code,
+--        total_sales, container_volume_units, growth_pct, trend_direction
+-- FROM vw_fr6_route_performance
+-- WHERE trend_direction = 'EXPANDING'
+-- ORDER BY total_sales DESC;
 
--- 5. Detect loss-making shipments (Net Profit < 0) for investigation
-SELECT * FROM profit_loss 
-WHERE net_profit < 0;
+-- 5. SELLER: View Underperforming Loss-Making Shipments (Investigation Screen)
+-- SELECT pl.pl_id, s.shipment_no, pl.period_month, pl.revenue, pl.freight_cost,
+--        pl.port_cost, pl.handling_cost, pl.claim_loss, pl.net_profit
+-- FROM profit_loss pl
+-- JOIN shipment s ON pl.shipment_id = s.shipment_id
+-- WHERE pl.seller_id = ? AND pl.net_profit < 0
+-- ORDER BY pl.net_profit ASC;
 
 
 -- -----------------------------------------------------------------------------
--- [U - UPDATE / RECALCULATE / OVERRIDE]
--- How updates are handled in an Analytics Engine:
+-- [U - UPDATE / RECALCULATE]
+-- Dynamic parameterized adjustments and snapshot refreshing:
 -- -----------------------------------------------------------------------------
--- 1. Dynamic Parameterized Recalculation (e.g., custom quarterly turnover period)
-CALL sp_calculate_inventory_turnover('2026-07-01', '2026-09-30');
+-- 1. Parameterized Inventory Turnover Recalculation (Custom Quarter / Fiscal Window)
+-- CALL sp_calculate_inventory_turnover(?, ?);
 
--- 2. Master Snapshot Refresh (Auto-updates all 5 tables with latest operational entries)
-CALL sp_refresh_all_fr6_analytics();
+-- 2. Complete Atomic Refresh (Pulls latest payments, shipments, and claims into P&L)
+-- CALL sp_refresh_all_fr6_analytics();
 
--- 3. Manual P&L Surcharge or Tariff Adjustment (Executive Cost Override)
-UPDATE profit_loss 
-SET port_cost = port_cost + 1500.00,
-    net_profit = revenue - freight_cost - (port_cost + 1500.00) - handling_cost - claim_loss
-WHERE pl_id = 1;
+-- 3. Manual P&L Expense Adjustment (Surcharge or Tariff Override by Authorized Seller)
+-- UPDATE profit_loss
+-- SET port_cost = port_cost + ?,
+--     net_profit = revenue - freight_cost - (port_cost + ?) - handling_cost - claim_loss
+-- WHERE pl_id = ? AND seller_id = ?;
 
 
 -- -----------------------------------------------------------------------------
 -- [D - DELETE / PURGE / CACHE INVALIDATION]
--- Why DELETE in FR6 differs from OLTP transactional tables:
--- Transactional tables (users, shipment, invoices) forbid hard delete to prevent 
--- FK corruption. Analytics tables store materialized results that CAN be purged or flushed.
+-- Analytics Result Cache Management:
 -- -----------------------------------------------------------------------------
--- 1. Purge Historical Cache older than 24 months (Retention Policy)
-DELETE FROM sales_trend_result 
-WHERE period_month < DATE_SUB(CURDATE(), INTERVAL 24 MONTH);
+-- 1. Purge Aged Analytical Records Older Than Retention Policy (Default 24 Months)
+-- CALL sp_purge_historical_analytics_cache(?);
 
--- 2. Invalidate / Flush Entire Analytics Cache prior to fresh recalculation:
-DELETE FROM profit_loss;
-DELETE FROM abc_classification_result;
-DELETE FROM inventory_turnover_result;
-DELETE FROM profitability_result;
-DELETE FROM sales_trend_result;
+-- 2. Complete Cache Flush prior to full data re-ingestion:
+-- DELETE FROM profit_loss;
+-- DELETE FROM abc_classification_result;
+-- DELETE FROM inventory_turnover_result;
+-- DELETE FROM profitability_result;
+-- DELETE FROM sales_trend_result;
 */
-

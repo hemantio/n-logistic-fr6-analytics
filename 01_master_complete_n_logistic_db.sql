@@ -1416,19 +1416,22 @@ BEGIN
         s.shipment_id,
         s.seller_id,
         DATE_FORMAT(s.created_at, '%Y-%m-01') AS period_month,
-        COALESCE(bi.total_amount, s.quoted_price) AS revenue,
-        COALESCE(pr.base_rate, 45000.00) AS freight_cost,
+        COALESCE(MAX(bi.total_amount), s.quoted_price, 0.00) AS revenue,
+        COALESCE(AVG(pr.base_rate), 45000.00) AS freight_cost,
         5000.00 AS port_cost,
         3500.00 AS handling_cost,
-        COALESCE((SELECT SUM(c.claimed_amount) FROM claims c WHERE c.shipment_id = s.shipment_id AND c.status = 'APPROVED'), 0.00) AS claim_loss,
-        (COALESCE(bi.total_amount, s.quoted_price) - COALESCE(pr.base_rate, 45000.00) - 5000.00 - 3500.00 
-         - COALESCE((SELECT SUM(c.claimed_amount) FROM claims c WHERE c.shipment_id = s.shipment_id AND c.status = 'APPROVED'), 0.00)
+        COALESCE((SELECT SUM(CASE WHEN c.approved_amount > 0 THEN c.approved_amount ELSE c.claimed_amount END) FROM claims c WHERE c.shipment_id = s.shipment_id AND c.status IN ('APPROVED', 'SETTLED')), 0.00) AS claim_loss,
+        (COALESCE(MAX(bi.total_amount), s.quoted_price, 0.00) 
+         - COALESCE(AVG(pr.base_rate), 45000.00) 
+         - 5000.00 
+         - 3500.00 
+         - COALESCE((SELECT SUM(CASE WHEN c.approved_amount > 0 THEN c.approved_amount ELSE c.claimed_amount END) FROM claims c WHERE c.shipment_id = s.shipment_id AND c.status IN ('APPROVED', 'SETTLED')), 0.00)
         ) AS net_profit
     FROM shipment s
     LEFT JOIN billing_invoices bi ON s.shipment_id = bi.shipment_id
     LEFT JOIN pricing_rules pr ON s.origin_port_id = pr.origin_port_id AND s.dest_port_id = pr.dest_port_id
     WHERE s.status != 'CANCELLED'
-    GROUP BY s.shipment_id, s.seller_id, DATE_FORMAT(s.created_at, '%Y-%m-01'), bi.total_amount, s.quoted_price, pr.base_rate;
+    GROUP BY s.shipment_id, s.seller_id, DATE_FORMAT(s.created_at, '%Y-%m-01');
 END //
 
 
