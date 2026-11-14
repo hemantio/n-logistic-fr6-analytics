@@ -12,7 +12,6 @@ DROP PROCEDURE IF EXISTS `sp_refresh_sales_trends`;
 DROP PROCEDURE IF EXISTS `sp_calculate_abc_classification`;
 DROP PROCEDURE IF EXISTS `sp_calculate_inventory_turnover`;
 DROP PROCEDURE IF EXISTS `sp_calculate_profitability`;
-DROP PROCEDURE IF EXISTS `sp_generate_demand_forecast`;
 DROP PROCEDURE IF EXISTS `sp_calculate_profit_loss`;
 DROP PROCEDURE IF EXISTS `sp_refresh_all_fr6_analytics`;
 
@@ -150,36 +149,8 @@ END //
 
 
 -- =============================================================================
--- PROCEDURE 5: sp_generate_demand_forecast
--- Table: demand_forecast (ERD #8)
--- Purpose: Projects next month's bookings, confidence %, and FR3 dynamic pricing multiplier.
--- =============================================================================
-CREATE PROCEDURE `sp_generate_demand_forecast`()
-BEGIN
-    DECLARE v_next_month DATE;
-    SET v_next_month = DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 1 MONTH);
-
-    DELETE FROM demand_forecast;
-
-    INSERT INTO demand_forecast (origin_port_id, dest_port_id, container_type, forecast_month, predicted_bookings, confidence_pct, suggested_multiplier)
-    SELECT 
-        s.origin_port_id,
-        s.dest_port_id,
-        c.container_type,
-        v_next_month,
-        ROUND(COUNT(s.shipment_id) * 1.15) + 2 AS predicted_bookings,
-        CASE WHEN COUNT(s.shipment_id) >= 3 THEN 88.00 ELSE 65.00 END AS confidence_pct,
-        CASE WHEN (ROUND(COUNT(s.shipment_id) * 1.15) + 2) > 4 THEN 1.05 ELSE 0.98 END AS suggested_multiplier
-    FROM shipment s
-    JOIN containers c ON s.container_id = c.container_id
-    WHERE s.status != 'CANCELLED'
-    GROUP BY s.origin_port_id, s.dest_port_id, c.container_type;
-END //
-
-
--- =============================================================================
--- PROCEDURE 6: sp_calculate_profit_loss
--- Table: profit_loss (ERD #12)
+-- PROCEDURE 5: sp_calculate_profit_loss
+-- Table: profit_loss (SRS Section 7.9 / ERD #11)
 -- Purpose: Computes shipment-level net profit and operating expense breakdown (FR2.8).
 -- =============================================================================
 CREATE PROCEDURE `sp_calculate_profit_loss`()
@@ -208,8 +179,8 @@ END //
 
 
 -- =============================================================================
--- PROCEDURE 7: sp_refresh_all_fr6_analytics (Master Orchestrator)
--- Purpose: Executes all 6 recalculation procedures in a single atomic transaction.
+-- PROCEDURE 6: sp_refresh_all_fr6_analytics (Master Orchestrator)
+-- Purpose: Executes all 5 recalculation procedures in a single atomic transaction.
 -- =============================================================================
 CREATE PROCEDURE `sp_refresh_all_fr6_analytics`()
 BEGIN
@@ -225,7 +196,6 @@ BEGIN
     CALL sp_calculate_abc_classification();
     CALL sp_calculate_inventory_turnover(NULL, NULL);
     CALL sp_calculate_profitability();
-    CALL sp_generate_demand_forecast();
     CALL sp_calculate_profit_loss();
 
     COMMIT;

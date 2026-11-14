@@ -1,10 +1,12 @@
 -- =============================================================================
 -- PROJECT: N Logistic Management Platform
--- MODULE:  FR6 - Analytics Dashboard (Executive & Operational Intelligence)
+-- MODULE:  FR6 - Analytics Dashboard & P&L (SRS Section 7.9)
 -- FILE:    FR6_DATABASE_HANDOVER_FOR_TL.sql
 -- PURPOSE: Master Integration SQL: Table DDL, Foreign Keys & Stored Procedures
 -- TARGET:  n_logistic_db (Universal MySQL 8.0+ / MariaDB 10.4+)
--- COMPLIANCE: Unified 28-Entity Chen ERD (SRS Sections 7.5 & 7.9)
+-- COMPLIANCE: Strict SRS Section 7.9 (5 Analytics & P&L Result Tables)
+-- NOTE:    demand_forecast (ERD #8) is owned by Module FR3 (Pricing - Section 7.5)
+--          and is excluded here to maintain strict Section 7.9 ownership.
 -- =============================================================================
 
 USE `n_logistic_db`;
@@ -14,7 +16,7 @@ SET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS;
 SET FOREIGN_KEY_CHECKS = 0;
 
 -- =============================================================================
--- SECTION 1: INITIAL TABLE CREATION (6 ANALYTICS TABLES WITH FOREIGN KEYS)
+-- SECTION 1: INITIAL TABLE CREATION (5 ANALYTICS & P&L TABLES WITH FOREIGN KEYS)
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
@@ -125,40 +127,7 @@ CREATE TABLE IF NOT EXISTS `profitability_result` (
 
 
 -- -----------------------------------------------------------------------------
--- 5. DEMAND FORECAST (ERD #8 / SRS Section 7.5)
--- Purpose: AI/Statistical monthly booking forecasts per route & container type (FR6.6).
--- Integration: Feeds suggested_multiplier directly into FR3 dynamic pricing rules.
--- Foreign Keys: origin_port_id -> ports(port_id), dest_port_id -> ports(port_id)
--- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS `demand_forecast` (
-    `forecast_id`          INT AUTO_INCREMENT PRIMARY KEY,
-    `origin_port_id`       INT NOT NULL,
-    `dest_port_id`         INT NOT NULL,
-    `container_type`       ENUM('DRY', 'REEFER', 'OPEN_TOP', 'TANK') NOT NULL,
-    `forecast_month`       DATE NOT NULL,
-    `predicted_bookings`   INT NOT NULL DEFAULT 0 COMMENT 'Forecasted container bookings for month',
-    `confidence_pct`       DECIMAL(5, 2) NOT NULL DEFAULT 0.00 COMMENT 'Confidence level percentage (e.g. 88.00%)',
-    `suggested_multiplier` DECIMAL(4, 2) NOT NULL DEFAULT 1.00 COMMENT 'Pricing multiplier suggested for FR3',
-    `created_at`           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT `fk_fr6_forecast_origin`
-        FOREIGN KEY (`origin_port_id`)
-        REFERENCES `ports`(`port_id`)
-        ON DELETE CASCADE
-        ON UPDATE CASCADE,
-
-    CONSTRAINT `fk_fr6_forecast_destination`
-        FOREIGN KEY (`dest_port_id`)
-        REFERENCES `ports`(`port_id`)
-        ON DELETE CASCADE
-        ON UPDATE CASCADE,
-
-    INDEX `idx_fr6_forecast_route` (`origin_port_id`, `dest_port_id`, `container_type`, `forecast_month`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
--- -----------------------------------------------------------------------------
--- 6. PROFIT LOSS (ERD #12 / SRS Section 7.9)
+-- 5. PROFIT LOSS (ERD #11 / SRS Section 7.9)
 -- Purpose: Shipment-level P&L tracking (FR6.5 & FR2.8).
 -- Formula: net_profit = revenue - freight_cost - port_cost - handling_cost - claim_loss.
 -- Foreign Keys: shipment_id -> shipment(shipment_id), seller_id -> companies(company_id)
@@ -196,14 +165,13 @@ SET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;
 
 
 -- =============================================================================
--- SECTION 2: SUPPORTING STORED PROCEDURES FOR THE 6 TABLES
+-- SECTION 2: SUPPORTING STORED PROCEDURES FOR THE 5 TABLES
 -- =============================================================================
 
 DROP PROCEDURE IF EXISTS `sp_refresh_sales_trends`;
 DROP PROCEDURE IF EXISTS `sp_calculate_abc_classification`;
 DROP PROCEDURE IF EXISTS `sp_calculate_inventory_turnover`;
 DROP PROCEDURE IF EXISTS `sp_calculate_profitability`;
-DROP PROCEDURE IF EXISTS `sp_generate_demand_forecast`;
 DROP PROCEDURE IF EXISTS `sp_calculate_profit_loss`;
 DROP PROCEDURE IF EXISTS `sp_refresh_all_fr6_analytics`;
 
@@ -341,36 +309,8 @@ END //
 
 
 -- -----------------------------------------------------------------------------
--- PROCEDURE 5: sp_generate_demand_forecast
--- Target Table: demand_forecast (Table 5)
--- Purpose: Projects next month's bookings, confidence %, and FR3 dynamic pricing multiplier.
--- -----------------------------------------------------------------------------
-CREATE PROCEDURE `sp_generate_demand_forecast`()
-BEGIN
-    DECLARE v_next_month DATE;
-    SET v_next_month = DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 1 MONTH);
-
-    DELETE FROM demand_forecast;
-
-    INSERT INTO demand_forecast (origin_port_id, dest_port_id, container_type, forecast_month, predicted_bookings, confidence_pct, suggested_multiplier)
-    SELECT 
-        s.origin_port_id,
-        s.dest_port_id,
-        c.container_type,
-        v_next_month,
-        ROUND(COUNT(s.shipment_id) * 1.15) + 2 AS predicted_bookings,
-        CASE WHEN COUNT(s.shipment_id) >= 3 THEN 88.00 ELSE 65.00 END AS confidence_pct,
-        CASE WHEN (ROUND(COUNT(s.shipment_id) * 1.15) + 2) > 4 THEN 1.05 ELSE 0.98 END AS suggested_multiplier
-    FROM shipment s
-    JOIN containers c ON s.container_id = c.container_id
-    WHERE s.status != 'CANCELLED'
-    GROUP BY s.origin_port_id, s.dest_port_id, c.container_type;
-END //
-
-
--- -----------------------------------------------------------------------------
--- PROCEDURE 6: sp_calculate_profit_loss
--- Target Table: profit_loss (Table 6)
+-- PROCEDURE 5: sp_calculate_profit_loss
+-- Target Table: profit_loss (Table 5)
 -- Purpose: Computes shipment-level net profit and operating expense breakdown (FR2.8).
 -- -----------------------------------------------------------------------------
 CREATE PROCEDURE `sp_calculate_profit_loss`()
@@ -399,8 +339,8 @@ END //
 
 
 -- -----------------------------------------------------------------------------
--- PROCEDURE 7: sp_refresh_all_fr6_analytics (Master Orchestrator)
--- Purpose: Executes all 6 recalculation procedures in a single atomic transaction.
+-- PROCEDURE 6: sp_refresh_all_fr6_analytics (Master Orchestrator)
+-- Purpose: Executes all 5 recalculation procedures in a single atomic transaction.
 -- -----------------------------------------------------------------------------
 CREATE PROCEDURE `sp_refresh_all_fr6_analytics`()
 BEGIN
@@ -416,7 +356,6 @@ BEGIN
     CALL sp_calculate_abc_classification();
     CALL sp_calculate_inventory_turnover(NULL, NULL);
     CALL sp_calculate_profitability();
-    CALL sp_generate_demand_forecast();
     CALL sp_calculate_profit_loss();
 
     COMMIT;

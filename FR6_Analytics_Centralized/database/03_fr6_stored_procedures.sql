@@ -3,10 +3,17 @@
 -- MODULE:  FR6 - Analytics Dashboard
 -- FILE:    fr6_stored_procedures.sql
 -- PURPOSE: Stored Procedures for Analytical Calculations & Table Maintenance
--- TARGET:  n_logistic_db (MySQL 8.0+ / MariaDB 10.4+)
+-- TARGET:  n_logistic_db (Universal MySQL 8.0+ / MariaDB 10.4+)
 -- =============================================================================
 
 USE `n_logistic_db`;
+
+DROP PROCEDURE IF EXISTS `sp_refresh_sales_trends`;
+DROP PROCEDURE IF EXISTS `sp_calculate_abc_classification`;
+DROP PROCEDURE IF EXISTS `sp_calculate_inventory_turnover`;
+DROP PROCEDURE IF EXISTS `sp_calculate_profitability`;
+DROP PROCEDURE IF EXISTS `sp_calculate_profit_loss`;
+DROP PROCEDURE IF EXISTS `sp_refresh_all_fr6_analytics`;
 
 DELIMITER //
 
@@ -15,7 +22,7 @@ DELIMITER //
 -- Table: sales_trend_result (ERD #10)
 -- Purpose: Aggregates historical monthly sales and container volume by route.
 -- =============================================================================
-CREATE OR REPLACE PROCEDURE sp_refresh_sales_trends()
+CREATE PROCEDURE `sp_refresh_sales_trends`()
 BEGIN
     DELETE FROM sales_trend_result;
 
@@ -30,7 +37,7 @@ BEGIN
     FROM shipment s
     LEFT JOIN sales_transactions st ON s.shipment_id = st.shipment_id
     WHERE s.status != 'CANCELLED'
-    GROUP BY period_month, s.origin_port_id, s.dest_port_id
+    GROUP BY DATE_FORMAT(COALESCE(st.sale_date, s.created_at), '%Y-%m-01'), s.origin_port_id, s.dest_port_id
     ORDER BY s.origin_port_id, s.dest_port_id, period_month ASC;
 END //
 
@@ -40,7 +47,7 @@ END //
 -- Table: abc_classification_result (ERD #26)
 -- Purpose: Calculates Pareto distribution (A = top 70%, B = next 20%, C = last 10%).
 -- =============================================================================
-CREATE OR REPLACE PROCEDURE sp_calculate_abc_classification()
+CREATE PROCEDURE `sp_calculate_abc_classification`()
 BEGIN
     DECLARE v_total_portfolio DECIMAL(14,2) DEFAULT 0.00;
 
@@ -81,7 +88,7 @@ END //
 -- Table: inventory_turnover_result (ERD #27)
 -- Purpose: Computes COGS and turnover ratio (turnover_ratio = cogs / avg_inventory).
 -- =============================================================================
-CREATE OR REPLACE PROCEDURE sp_calculate_inventory_turnover(
+CREATE PROCEDURE `sp_calculate_inventory_turnover`(
     IN p_start DATE,
     IN p_end DATE
 )
@@ -120,7 +127,7 @@ END //
 -- Table: profitability_result (ERD #28)
 -- Purpose: Computes monthly gross revenue, cost, and margin % per product.
 -- =============================================================================
-CREATE OR REPLACE PROCEDURE sp_calculate_profitability()
+CREATE PROCEDURE `sp_calculate_profitability`()
 BEGIN
     DELETE FROM profitability_result;
 
@@ -137,44 +144,16 @@ BEGIN
         END AS margin_pct
     FROM sales_transactions st
     JOIN products p ON st.product_id = p.product_id
-    GROUP BY period_month, p.product_id;
+    GROUP BY DATE_FORMAT(st.sale_date, '%Y-%m-01'), p.product_id, p.unit_price;
 END //
 
 
 -- =============================================================================
--- PROCEDURE 5: sp_generate_demand_forecast
--- Table: demand_forecast (ERD #8)
--- Purpose: Projects next month's bookings, confidence %, and FR3 dynamic pricing multiplier.
+-- PROCEDURE 5: sp_calculate_profit_loss
+-- Table: profit_loss (SRS Section 7.9 / ERD #11)
+-- Purpose: Computes shipment-level net profit and operating expense breakdown (FR2.8).
 -- =============================================================================
-CREATE OR REPLACE PROCEDURE sp_generate_demand_forecast()
-BEGIN
-    DECLARE v_next_month DATE;
-    SET v_next_month = DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 1 MONTH);
-
-    DELETE FROM demand_forecast;
-
-    INSERT INTO demand_forecast (origin_port_id, dest_port_id, container_type, forecast_month, predicted_bookings, confidence_pct, suggested_multiplier)
-    SELECT 
-        s.origin_port_id,
-        s.dest_port_id,
-        c.container_type,
-        v_next_month,
-        ROUND(COUNT(s.shipment_id) * 1.15) + 2 AS predicted_bookings,
-        CASE WHEN COUNT(s.shipment_id) >= 3 THEN 88.00 ELSE 65.00 END AS confidence_pct,
-        CASE WHEN (ROUND(COUNT(s.shipment_id) * 1.15) + 2) > 4 THEN 1.05 ELSE 0.98 END AS suggested_multiplier
-    FROM shipment s
-    JOIN containers c ON s.container_id = c.container_id
-    WHERE s.status != 'CANCELLED'
-    GROUP BY s.origin_port_id, s.dest_port_id, c.container_type;
-END //
-
-
--- =============================================================================
--- PROCEDURE 6: sp_calculate_profit_loss
--- Table: profit_loss (ERD #12)
--- Purpose: Computes shipment-level net profit and operating expense breakdown.
--- =============================================================================
-CREATE OR REPLACE PROCEDURE sp_calculate_profit_loss()
+CREATE PROCEDURE `sp_calculate_profit_loss`()
 BEGIN
     DELETE FROM profit_loss;
 
@@ -195,15 +174,15 @@ BEGIN
     LEFT JOIN billing_invoices bi ON s.shipment_id = bi.shipment_id
     LEFT JOIN pricing_rules pr ON s.origin_port_id = pr.origin_port_id AND s.dest_port_id = pr.dest_port_id
     WHERE s.status != 'CANCELLED'
-    GROUP BY s.shipment_id, period_month, s.seller_id, revenue, freight_cost;
+    GROUP BY s.shipment_id, s.seller_id, DATE_FORMAT(s.created_at, '%Y-%m-01'), bi.total_amount, s.quoted_price, pr.base_rate;
 END //
 
 
 -- =============================================================================
--- PROCEDURE 7: sp_refresh_all_fr6_analytics (Master Orchestrator)
--- Purpose: Executes all 6 recalculation procedures in a single atomic transaction.
+-- PROCEDURE 6: sp_refresh_all_fr6_analytics (Master Orchestrator)
+-- Purpose: Executes all 5 recalculation procedures in a single atomic transaction.
 -- =============================================================================
-CREATE OR REPLACE PROCEDURE sp_refresh_all_fr6_analytics()
+CREATE PROCEDURE `sp_refresh_all_fr6_analytics`()
 BEGIN
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
@@ -217,7 +196,6 @@ BEGIN
     CALL sp_calculate_abc_classification();
     CALL sp_calculate_inventory_turnover(NULL, NULL);
     CALL sp_calculate_profitability();
-    CALL sp_generate_demand_forecast();
     CALL sp_calculate_profit_loss();
 
     COMMIT;

@@ -96,34 +96,7 @@ CREATE TABLE IF NOT EXISTS `profitability_result` (
 
 
 -- =====================================================
--- 5. DEMAND FORECAST (SRS 7.5 / ERD #8)
--- References: ports(port_id)
--- =====================================================
-CREATE TABLE IF NOT EXISTS `demand_forecast` (
-    `forecast_id` INT AUTO_INCREMENT PRIMARY KEY,
-    `origin_port_id` INT NOT NULL,
-    `dest_port_id` INT NOT NULL,
-    `container_type` ENUM('DRY', 'REEFER', 'OPEN_TOP', 'TANK') NOT NULL,
-    `forecast_month` DATE NOT NULL,
-    `predicted_bookings` INT NOT NULL DEFAULT 0,
-    `confidence_pct` DECIMAL(5, 2) NOT NULL DEFAULT 0.00,
-    `suggested_multiplier` DECIMAL(4, 2) NOT NULL DEFAULT 1.00,
-    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT `fk_fr6_forecast_origin`
-        FOREIGN KEY (`origin_port_id`)
-        REFERENCES `ports`(`port_id`)
-        ON DELETE CASCADE,
-
-    CONSTRAINT `fk_fr6_forecast_destination`
-        FOREIGN KEY (`dest_port_id`)
-        REFERENCES `ports`(`port_id`)
-        ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
--- =====================================================
--- 6. PROFIT AND LOSS (SRS 7.9 / ERD #12)
+-- 5. PROFIT AND LOSS (SRS 7.9 / ERD #11)
 -- References: shipment(shipment_id), companies(company_id)
 -- =====================================================
 CREATE TABLE IF NOT EXISTS `profit_loss` (
