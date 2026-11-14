@@ -362,3 +362,188 @@ BEGIN
 END //
 
 DELIMITER ;
+
+
+-- =============================================================================
+-- SECTION 3: MULTI-DIMENSIONAL ANALYTICAL VIEWS (FR6.1 - FR6.8)
+-- Purpose: Pre-aggregated reporting views for dashboard visualization & viva demo.
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- VIEW 1: vw_fr6_executive_kpis (FR6.1)
+-- Purpose: Unified real-time dashboard header metrics across all active modules.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `vw_fr6_executive_kpis` AS
+SELECT 
+    (SELECT COUNT(*) FROM shipment WHERE status NOT IN ('CANCELLED', 'DELIVERED')) AS active_shipments_count,
+    (SELECT COUNT(*) FROM containers WHERE status = 'AVAILABLE') AS available_containers_count,
+    (SELECT COALESCE(SUM(paid_amount), 0.00) FROM billing_invoices) AS total_revenue_collected,
+    (SELECT COALESCE(SUM(total_amount - paid_amount), 0.00) FROM billing_invoices WHERE status != 'PAID') AS pending_invoices_amount,
+    (SELECT COUNT(*) FROM claims WHERE status IN ('SUBMITTED', 'UNDER_REVIEW')) AS open_claims_count;
+
+
+-- -----------------------------------------------------------------------------
+-- VIEW 2: vw_fr6_seller_pl_summary (FR6.5 & FR2.8)
+-- Purpose: Consolidated monthly P&L overview per seller company.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `vw_fr6_seller_pl_summary` AS
+SELECT 
+    pl.period_month,
+    c.company_id AS seller_id,
+    c.company_name AS seller_name,
+    COUNT(pl.shipment_id) AS total_shipments_billed,
+    SUM(pl.revenue) AS total_gross_revenue,
+    SUM(pl.freight_cost) AS total_freight_cost,
+    SUM(pl.port_cost) AS total_port_cost,
+    SUM(pl.handling_cost) AS total_handling_cost,
+    SUM(pl.claim_loss) AS total_claim_deductions,
+    SUM(pl.net_profit) AS net_operating_profit,
+    CASE 
+        WHEN SUM(pl.revenue) > 0 THEN 
+            ROUND((SUM(pl.net_profit) / SUM(pl.revenue)) * 100, 2)
+        ELSE 0.00 
+    END AS profit_margin_pct
+FROM profit_loss pl
+JOIN companies c ON pl.seller_id = c.company_id
+GROUP BY pl.period_month, c.company_id, c.company_name
+ORDER BY pl.period_month DESC, net_operating_profit DESC;
+
+
+-- -----------------------------------------------------------------------------
+-- VIEW 3: vw_fr6_abc_inventory_analysis (FR6.3)
+-- Purpose: Joins Pareto classification with product & seller details.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `vw_fr6_abc_inventory_analysis` AS
+SELECT 
+    abc.result_id,
+    p.product_id,
+    p.sku,
+    p.product_name,
+    p.category,
+    c.company_name AS seller_name,
+    abc.annual_value,
+    abc.cumulative_pct,
+    abc.abc_class,
+    CASE 
+        WHEN abc.abc_class = 'A' THEN 'High Value (Top 70% Revenue - Strict Control)'
+        WHEN abc.abc_class = 'B' THEN 'Moderate Value (Next 20% Revenue - Moderate Control)'
+        ELSE 'Low Value (Final 10% Revenue - Bulk/Simple Control)'
+    END AS control_category,
+    abc.calculated_on
+FROM abc_classification_result abc
+JOIN products p ON abc.product_id = p.product_id
+JOIN companies c ON p.owner_company_id = c.company_id
+ORDER BY abc.annual_value DESC;
+
+
+-- -----------------------------------------------------------------------------
+-- VIEW 4: vw_fr6_route_performance (FR6.2)
+-- Purpose: Joins historical route sales trends with human-readable port names.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `vw_fr6_route_performance` AS
+SELECT 
+    st.result_id,
+    st.period_month,
+    COALESCE(p_orig.port_name, 'Consolidated') AS origin_port,
+    COALESCE(p_orig.port_code, 'N/A') AS origin_code,
+    COALESCE(p_dest.port_name, 'Consolidated') AS destination_port,
+    COALESCE(p_dest.port_code, 'N/A') AS destination_code,
+    st.total_sales,
+    st.total_qty AS container_volume_units,
+    st.growth_pct,
+    CASE 
+        WHEN st.growth_pct > 0 THEN 'EXPANDING'
+        WHEN st.growth_pct < 0 THEN 'DECLINING'
+        ELSE 'STABLE'
+    END AS trend_direction
+FROM sales_trend_result st
+LEFT JOIN ports p_orig ON st.origin_port_id = p_orig.port_id
+LEFT JOIN ports p_dest ON st.dest_port_id = p_dest.port_id
+ORDER BY st.period_month DESC, st.total_sales DESC;
+
+
+-- =============================================================================
+-- SECTION 4: STANDARD CRUD OPERATIONS FOR MODULE FR6 (EVALUATION / VIVA)
+-- =============================================================================
+-- NOTE: In an Analytics & P&L module (SRS 7.9), CRUD operates on materialized 
+-- analytical result sets and reporting caches rather than primary transactional rows.
+
+/*
+-- -----------------------------------------------------------------------------
+-- [C - CREATE / CALCULATE]
+-- Generate/Materialize analytical snapshots across all 5 tables from live OLTP data:
+-- -----------------------------------------------------------------------------
+-- Option 1: Master Atomic Calculation (Refreshes all 5 tables in 1 transaction)
+CALL sp_refresh_all_fr6_analytics();
+
+-- Option 2: Modular On-Demand Calculation
+CALL sp_refresh_sales_trends();
+CALL sp_calculate_abc_classification();
+CALL sp_calculate_inventory_turnover('2026-01-01', '2026-12-31');
+CALL sp_calculate_profitability();
+CALL sp_calculate_profit_loss();
+
+-- Option 3: Manual Direct Insert (e.g. Budget Target or Adjusted P&L Baseline)
+INSERT INTO profit_loss (shipment_id, seller_id, period_month, revenue, freight_cost, port_cost, handling_cost, claim_loss, net_profit)
+VALUES (NULL, 1, '2026-12-01', 500000.00, 180000.00, 25000.00, 15000.00, 0.00, 280000.00);
+
+
+-- -----------------------------------------------------------------------------
+-- [R - READ / VIEW]
+-- Multi-dimensional slicing and dicing across routes, sellers, and date ranges:
+-- -----------------------------------------------------------------------------
+-- 1. Read Executive KPI Dashboard
+SELECT * FROM vw_fr6_executive_kpis;
+
+-- 2. Read Seller P&L breakdown for specific month or seller
+SELECT * FROM vw_fr6_seller_pl_summary 
+WHERE seller_id = 1 AND period_month >= '2026-01-01';
+
+-- 3. Read High-Priority Class 'A' Inventory requiring tight warehouse control
+SELECT * FROM vw_fr6_abc_inventory_analysis 
+WHERE abc_class = 'A';
+
+-- 4. Read Top-Performing Trade Routes with positive growth
+SELECT * FROM vw_fr6_route_performance 
+WHERE trend_direction = 'EXPANDING';
+
+-- 5. Detect loss-making shipments (Net Profit < 0) for investigation
+SELECT * FROM profit_loss 
+WHERE net_profit < 0;
+
+
+-- -----------------------------------------------------------------------------
+-- [U - UPDATE / RECALCULATE / OVERRIDE]
+-- How updates are handled in an Analytics Engine:
+-- -----------------------------------------------------------------------------
+-- 1. Dynamic Parameterized Recalculation (e.g., custom quarterly turnover period)
+CALL sp_calculate_inventory_turnover('2026-07-01', '2026-09-30');
+
+-- 2. Master Snapshot Refresh (Auto-updates all 5 tables with latest operational entries)
+CALL sp_refresh_all_fr6_analytics();
+
+-- 3. Manual P&L Surcharge or Tariff Adjustment (Executive Cost Override)
+UPDATE profit_loss 
+SET port_cost = port_cost + 1500.00,
+    net_profit = revenue - freight_cost - (port_cost + 1500.00) - handling_cost - claim_loss
+WHERE pl_id = 1;
+
+
+-- -----------------------------------------------------------------------------
+-- [D - DELETE / PURGE / CACHE INVALIDATION]
+-- Why DELETE in FR6 differs from OLTP transactional tables:
+-- Transactional tables (users, shipment, invoices) forbid hard delete to prevent 
+-- FK corruption. Analytics tables store materialized results that CAN be purged or flushed.
+-- -----------------------------------------------------------------------------
+-- 1. Purge Historical Cache older than 24 months (Retention Policy)
+DELETE FROM sales_trend_result 
+WHERE period_month < DATE_SUB(CURDATE(), INTERVAL 24 MONTH);
+
+-- 2. Invalidate / Flush Entire Analytics Cache prior to fresh recalculation:
+DELETE FROM profit_loss;
+DELETE FROM abc_classification_result;
+DELETE FROM inventory_turnover_result;
+DELETE FROM profitability_result;
+DELETE FROM sales_trend_result;
+*/
+
