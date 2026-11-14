@@ -3,87 +3,676 @@
 -- MODULE:  FR6 - Analytics Dashboard & P&L (SRS Section 7.9 Complete Checklist)
 -- FILE:    FR6_DATABASE_HANDOVER_FOR_TL_CHECKLIST.sql
 -- PURPOSE: Master Database Implementation Checklist for Module FR6 & Section 7.9
+-- TARGET:  Dedicated Dummy/Test Database: `n_logistic_dummy_db`
 -- SCOPE:   Database Only | AI/ML Excluded | 28 Core Entities Preserved
 -- ENGINE:  MySQL 8.0+ / MariaDB 10.4+ (Compatible with XAMPP & Production)
+-- NOTICE:  This script is 100% self-contained. It creates `n_logistic_dummy_db`,
+--          seeds realistic operational test data, creates all 10 analytics tables,
+--          11 indexes, 16 views, 12 procedures, 7 triggers, and executes the
+--          complete verification test suite without touching any production db.
 -- =============================================================================
 
-USE `n_logistic_db`;
+-- =============================================================================
+-- STEP 0: CREATE AND SWITCH TO DEDICATED DUMMY DATABASE
+-- =============================================================================
+CREATE DATABASE IF NOT EXISTS `n_logistic_dummy_db` 
+    DEFAULT CHARACTER SET utf8mb4 
+    COLLATE utf8mb4_unicode_ci;
 
--- Temporarily disable FK checks to ensure safe idempotent schema execution
+USE `n_logistic_dummy_db`;
+
+-- Temporarily disable foreign key checks for safe idempotent initialization
 SET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS;
 SET FOREIGN_KEY_CHECKS = 0;
 
 -- =============================================================================
--- SECTION 1: ANALYTICS SCHEMAS & TABLES (10 RESULT TABLES + SUPPORTING ENTITIES)
+-- STEP 1: PREREQUISITE OPERATIONAL CORE ENTITIES (28 CORE TABLES)
 -- =============================================================================
 
--- -----------------------------------------------------------------------------
--- 1.0 PREREQUISITE OPERATIONAL SCHEMA ALIGNMENTS (SOURCE DATA VERIFICATION)
--- -----------------------------------------------------------------------------
-
--- Ensure products.unit_cost exists for FR6.5 product margin calculation
-DROP PROCEDURE IF EXISTS `sp_ensure_product_unit_cost`;
-DELIMITER //
-CREATE PROCEDURE `sp_ensure_product_unit_cost`()
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns 
-        WHERE table_schema = DATABASE() AND table_name = 'products' AND column_name = 'unit_cost'
-    ) THEN
-        ALTER TABLE `products` ADD COLUMN `unit_cost` DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER `unit_price`;
-        UPDATE `products` SET `unit_cost` = ROUND(`unit_price` * 0.65, 2);
-    END IF;
-END //
-DELIMITER ;
-CALL sp_ensure_product_unit_cost();
-DROP PROCEDURE IF EXISTS `sp_ensure_product_unit_cost`;
-
--- Ensure shipment_costs exists for Checklist Query 7.10
-CREATE TABLE IF NOT EXISTS `shipment_costs` (
-    `cost_id`     BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `shipment_id` INT NOT NULL,
-    `cost_type`   ENUM('FREIGHT', 'PORT', 'HANDLING', 'CUSTOMS', 'INSURANCE', 'OTHER') NOT NULL,
-    `amount`      DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
-    `description` VARCHAR(255) NULL,
-    `cost_date`   DATE NOT NULL,
-    `recorded_by` INT NULL,
-    `created_at`  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT `fk_sc_shipment` FOREIGN KEY (`shipment_id`) REFERENCES `shipment`(`shipment_id`) ON DELETE CASCADE,
-    INDEX `idx_sc_shipment_type` (`shipment_id`, `cost_type`)
+-- 1. Companies (SRS 7.3 / ERD #3)
+CREATE TABLE IF NOT EXISTS `companies` (
+    `company_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `company_name` VARCHAR(150) NOT NULL,
+    `company_type` ENUM('CONSUMER', 'SELLER') NOT NULL,
+    `gst_number` VARCHAR(20) UNIQUE,
+    `iec_code` VARCHAR(15) NULL,
+    `address` TEXT NULL,
+    `city` VARCHAR(60) NULL,
+    `country` VARCHAR(60) NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Seed baseline shipment costs for active shipments if table is empty
-INSERT INTO `shipment_costs` (`shipment_id`, `cost_type`, `amount`, `description`, `cost_date`, `recorded_by`)
-SELECT s.shipment_id, 'FREIGHT', COALESCE(AVG(pr.base_rate), 45000.00), 'Standard Ocean Freight', DATE(s.created_at), s.seller_id
-FROM shipment s
-LEFT JOIN pricing_rules pr ON s.origin_port_id = pr.origin_port_id AND s.dest_port_id = pr.dest_port_id
-WHERE NOT EXISTS (SELECT 1 FROM shipment_costs WHERE shipment_id = s.shipment_id AND cost_type = 'FREIGHT')
-GROUP BY s.shipment_id, DATE(s.created_at), s.seller_id;
+-- 2. Users (SRS 7.3 / ERD #2)
+CREATE TABLE IF NOT EXISTS `users` (
+    `user_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `role` ENUM('ADMIN', 'CONSUMER', 'SELLER') NOT NULL,
+    `company_id` INT NULL,
+    `full_name` VARCHAR(100) NOT NULL,
+    `email` VARCHAR(120) NOT NULL UNIQUE,
+    `password_hash` VARCHAR(255) NOT NULL,
+    `phone` VARCHAR(20) NULL,
+    `status` ENUM('ACTIVE', 'INACTIVE', 'LOCKED') NOT NULL DEFAULT 'ACTIVE',
+    `failed_attempts` INT NOT NULL DEFAULT 0,
+    `last_login` DATETIME NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_users_company` FOREIGN KEY (`company_id`) REFERENCES `companies` (`company_id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-INSERT INTO `shipment_costs` (`shipment_id`, `cost_type`, `amount`, `description`, `cost_date`, `recorded_by`)
-SELECT s.shipment_id, 'PORT', 5000.00, 'Port dues and terminal tariff', DATE(s.created_at), s.seller_id
-FROM shipment s
-WHERE NOT EXISTS (SELECT 1 FROM shipment_costs WHERE shipment_id = s.shipment_id AND cost_type = 'PORT');
+-- 3. Customers (SRS 7.3 / ERD #5)
+CREATE TABLE IF NOT EXISTS `customers` (
+    `customer_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `user_id` INT NOT NULL UNIQUE,
+    `company_id` INT NULL,
+    `contact_person` VARCHAR(100) NULL,
+    `billing_address` TEXT NULL,
+    `credit_limit` DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_customers_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`user_id`) ON DELETE CASCADE,
+    CONSTRAINT `fk_dummy_customers_company` FOREIGN KEY (`company_id`) REFERENCES `companies` (`company_id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-INSERT INTO `shipment_costs` (`shipment_id`, `cost_type`, `amount`, `description`, `cost_date`, `recorded_by`)
-SELECT s.shipment_id, 'HANDLING', 3500.00, 'Stevedoring and container handling', DATE(s.created_at), s.seller_id
-FROM shipment s
-WHERE NOT EXISTS (SELECT 1 FROM shipment_costs WHERE shipment_id = s.shipment_id AND cost_type = 'HANDLING');
+-- 4. Audit Log (SRS 7.3 / ERD #1)
+CREATE TABLE IF NOT EXISTS `audit_log` (
+    `log_id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `user_id` INT NULL,
+    `action` VARCHAR(100) NOT NULL,
+    `table_name` VARCHAR(60) NULL,
+    `record_id` BIGINT NULL,
+    `old_value` LONGTEXT NULL,
+    `new_value` LONGTEXT NULL,
+    `ip_address` VARCHAR(45) NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_audit_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`user_id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- -----------------------------------------------------------------------------
--- 1.1 EXISTING SRS SECTION 7.9 TABLES (5 ORIGINAL + DEMAND_FORECAST)
--- -----------------------------------------------------------------------------
+-- 5. Ports (SRS 7.4 / ERD #9)
+CREATE TABLE IF NOT EXISTS `ports` (
+    `port_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `port_code` VARCHAR(10) NOT NULL UNIQUE,
+    `port_name` VARCHAR(100) NOT NULL,
+    `city` VARCHAR(60) NULL,
+    `country` VARCHAR(60) NULL,
+    `latitude` DECIMAL(9, 6) NULL,
+    `longitude` DECIMAL(9, 6) NULL,
+    `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 6. Vessels (SRS 7.4 / ERD #4)
+CREATE TABLE IF NOT EXISTS `vessels` (
+    `vessel_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `vessel_name` VARCHAR(100) NOT NULL,
+    `imo_number` VARCHAR(15) UNIQUE NULL,
+    `owner_company_id` INT NULL,
+    `capacity_teu` INT NULL,
+    `status` ENUM('ACTIVE', 'MAINTENANCE') NOT NULL DEFAULT 'ACTIVE',
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_vessels_company` FOREIGN KEY (`owner_company_id`) REFERENCES `companies` (`company_id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 7. Containers (SRS 7.4 / ERD #11)
+CREATE TABLE IF NOT EXISTS `containers` (
+    `container_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `container_number` VARCHAR(15) NOT NULL UNIQUE,
+    `seller_id` INT NOT NULL,
+    `container_type` ENUM('DRY', 'REEFER', 'OPEN_TOP', 'TANK') NOT NULL,
+    `size_ft` TINYINT NOT NULL COMMENT '20 or 40',
+    `max_weight_kg` DECIMAL(10, 2) NOT NULL,
+    `max_volume_cbm` DECIMAL(8, 2) NOT NULL,
+    `current_port_id` INT NULL,
+    `status` ENUM('AVAILABLE', 'ALLOCATED', 'IN_TRANSIT', 'MAINTENANCE') NOT NULL DEFAULT 'AVAILABLE',
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_containers_seller` FOREIGN KEY (`seller_id`) REFERENCES `companies` (`company_id`) ON DELETE RESTRICT,
+    CONSTRAINT `fk_dummy_containers_port` FOREIGN KEY (`current_port_id`) REFERENCES `ports` (`port_id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 8. Shipment (SRS 7.4 / ERD #14)
+CREATE TABLE IF NOT EXISTS `shipment` (
+    `shipment_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `shipment_no` VARCHAR(20) NOT NULL UNIQUE,
+    `consumer_id` INT NOT NULL,
+    `seller_id` INT NOT NULL,
+    `container_id` INT NOT NULL,
+    `vessel_id` INT NULL,
+    `origin_port_id` INT NOT NULL,
+    `dest_port_id` INT NOT NULL,
+    `cargo_description` VARCHAR(255) NULL,
+    `cargo_weight_kg` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+    `cargo_volume_cbm` DECIMAL(8, 2) NOT NULL DEFAULT 0.00,
+    `quoted_price` DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    `status` ENUM('BOOKED', 'LOADED', 'DEPARTED', 'IN_TRANSIT', 'ARRIVED', 'CUSTOMS_CLEARED', 'DELIVERED', 'CANCELLED') NOT NULL DEFAULT 'BOOKED',
+    `booking_confirmed` TINYINT(1) NOT NULL DEFAULT 1,
+    `etd` DATE NULL,
+    `eta` DATE NULL,
+    `actual_arrival` DATE NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_shipment_consumer` FOREIGN KEY (`consumer_id`) REFERENCES `customers` (`customer_id`) ON DELETE RESTRICT,
+    CONSTRAINT `fk_dummy_shipment_seller` FOREIGN KEY (`seller_id`) REFERENCES `users` (`user_id`) ON DELETE RESTRICT,
+    CONSTRAINT `fk_dummy_shipment_container` FOREIGN KEY (`container_id`) REFERENCES `containers` (`container_id`) ON DELETE RESTRICT,
+    CONSTRAINT `fk_dummy_shipment_vessel` FOREIGN KEY (`vessel_id`) REFERENCES `vessels` (`vessel_id`) ON DELETE SET NULL,
+    CONSTRAINT `fk_dummy_shipment_origin` FOREIGN KEY (`origin_port_id`) REFERENCES `ports` (`port_id`) ON DELETE RESTRICT,
+    CONSTRAINT `fk_dummy_shipment_dest` FOREIGN KEY (`dest_port_id`) REFERENCES `ports` (`port_id`) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 9. Container Movements (SRS 7.4 / ERD #13)
+CREATE TABLE IF NOT EXISTS `container_movements` (
+    `movement_id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `shipment_id` INT NOT NULL,
+    `container_id` INT NOT NULL,
+    `status` ENUM('BOOKED', 'LOADED', 'DEPARTED', 'IN_TRANSIT', 'ARRIVED', 'CUSTOMS_CLEARED', 'DELIVERED', 'CANCELLED') NOT NULL,
+    `port_id` INT NULL,
+    `location_text` VARCHAR(150) NULL,
+    `event_time` DATETIME NOT NULL,
+    `remarks` VARCHAR(255) NULL,
+    `updated_by` INT NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_movement_shipment` FOREIGN KEY (`shipment_id`) REFERENCES `shipment` (`shipment_id`) ON DELETE CASCADE,
+    CONSTRAINT `fk_dummy_movement_container` FOREIGN KEY (`container_id`) REFERENCES `containers` (`container_id`) ON DELETE CASCADE,
+    CONSTRAINT `fk_dummy_movement_port` FOREIGN KEY (`port_id`) REFERENCES `ports` (`port_id`) ON DELETE SET NULL,
+    CONSTRAINT `fk_dummy_movement_user` FOREIGN KEY (`updated_by`) REFERENCES `users` (`user_id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 10. Products (SRS 7.6 / ERD #24)
+CREATE TABLE IF NOT EXISTS `products` (
+    `product_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `sku` VARCHAR(40) NOT NULL UNIQUE,
+    `product_name` VARCHAR(120) NOT NULL,
+    `category` VARCHAR(60) NULL,
+    `hs_code` VARCHAR(12) NULL,
+    `unit` VARCHAR(10) NULL,
+    `unit_weight_kg` DECIMAL(8, 3) NULL,
+    `unit_volume_cbm` DECIMAL(10, 4) NOT NULL DEFAULT 0.0000,
+    `unit_price` DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    `unit_cost` DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    `owner_company_id` INT NOT NULL,
+    `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_products_owner` FOREIGN KEY (`owner_company_id`) REFERENCES `companies` (`company_id`) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 11. Shipment Items (SRS 7.4 / ERD #18)
+CREATE TABLE IF NOT EXISTS `shipment_items` (
+    `item_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `shipment_id` INT NOT NULL,
+    `product_id` INT NOT NULL,
+    `quantity` INT NOT NULL,
+    `unit_price` DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    `weight_kg` DECIMAL(10, 2) NULL,
+    `volume_cbm` DECIMAL(8, 2) NULL,
+    `amount` DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_items_shipment` FOREIGN KEY (`shipment_id`) REFERENCES `shipment` (`shipment_id`) ON DELETE CASCADE,
+    CONSTRAINT `fk_dummy_items_product` FOREIGN KEY (`product_id`) REFERENCES `products` (`product_id`) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 12. Pricing Rules (SRS 7.5 / ERD #7)
+CREATE TABLE IF NOT EXISTS `pricing_rules` (
+    `rule_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `seller_id` INT NOT NULL,
+    `origin_port_id` INT NOT NULL,
+    `dest_port_id` INT NOT NULL,
+    `container_type` ENUM('DRY', 'REEFER', 'OPEN_TOP', 'TANK') NOT NULL,
+    `base_rate` DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    `rate_per_kg` DECIMAL(8, 4) NOT NULL DEFAULT 0.0000,
+    `rate_per_cbm` DECIMAL(6, 2) NOT NULL DEFAULT 0.00,
+    `season_multiplier` DECIMAL(4, 2) NOT NULL DEFAULT 1.00,
+    `demand_multiplier` DECIMAL(4, 2) NOT NULL DEFAULT 1.00,
+    `valid_from` DATE NOT NULL,
+    `valid_to` DATE NOT NULL,
+    `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_pricing_seller` FOREIGN KEY (`seller_id`) REFERENCES `companies` (`company_id`) ON DELETE CASCADE,
+    CONSTRAINT `fk_dummy_pricing_origin` FOREIGN KEY (`origin_port_id`) REFERENCES `ports` (`port_id`) ON DELETE RESTRICT,
+    CONSTRAINT `fk_dummy_pricing_dest` FOREIGN KEY (`dest_port_id`) REFERENCES `ports` (`port_id`) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 13. Pricing Audit (SRS 7.5 / ERD #8)
+CREATE TABLE IF NOT EXISTS `pricing_audit` (
+    `audit_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `rule_id` INT NOT NULL,
+    `old_rate` DECIMAL(12, 2) NULL,
+    `new_rate` DECIMAL(12, 2) NULL,
+    `old_multiplier` DECIMAL(4, 2) NULL,
+    `new_multiplier` DECIMAL(4, 2) NULL,
+    `changed_by` INT NULL,
+    `changed_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_pricing_audit_rule` FOREIGN KEY (`rule_id`) REFERENCES `pricing_rules` (`rule_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 14. Stock (SRS 7.6 / ERD #21)
+CREATE TABLE IF NOT EXISTS `stock` (
+    `stock_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `product_id` INT NOT NULL,
+    `shipment_id` INT NULL,
+    `container_id` INT NULL,
+    `quantity` INT NOT NULL DEFAULT 0,
+    `damaged_qty` INT NOT NULL DEFAULT 0,
+    `last_updated` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_stock_product` FOREIGN KEY (`product_id`) REFERENCES `products` (`product_id`) ON DELETE CASCADE,
+    CONSTRAINT `chk_dummy_stock_qty` CHECK (`quantity` >= 0),
+    CONSTRAINT `chk_dummy_stock_damaged` CHECK (`damaged_qty` >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 15. Inventory Ledger (SRS 7.6 / ERD #23)
+CREATE TABLE IF NOT EXISTS `inventory_ledger` (
+    `ledger_id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `stock_id` INT NOT NULL,
+    `product_id` INT NOT NULL,
+    `txn_type` ENUM('IN', 'OUT', 'DAMAGE', 'ADJUST', 'CLAIM_LOSS') NOT NULL,
+    `quantity` INT NOT NULL,
+    `balance_after` INT NOT NULL,
+    `reference_type` VARCHAR(30) NULL,
+    `reference_id` BIGINT NULL,
+    `txn_time` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_ledger_stock` FOREIGN KEY (`stock_id`) REFERENCES `stock` (`stock_id`) ON DELETE CASCADE,
+    CONSTRAINT `fk_dummy_ledger_product` FOREIGN KEY (`product_id`) REFERENCES `products` (`product_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 16. Sales Transactions (SRS 7.6 / ERD #22)
+CREATE TABLE IF NOT EXISTS `sales_transactions` (
+    `sale_id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `product_id` INT NOT NULL,
+    `customer_id` INT NOT NULL,
+    `shipment_id` INT NULL,
+    `quantity` INT NOT NULL,
+    `unit_price` DECIMAL(12, 2) NOT NULL,
+    `total_amount` DECIMAL(14, 2) NOT NULL,
+    `sale_date` DATE NOT NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_sales_product` FOREIGN KEY (`product_id`) REFERENCES `products` (`product_id`) ON DELETE RESTRICT,
+    CONSTRAINT `fk_dummy_sales_customer` FOREIGN KEY (`customer_id`) REFERENCES `customers` (`customer_id`) ON DELETE RESTRICT,
+    CONSTRAINT `fk_dummy_sales_shipment` FOREIGN KEY (`shipment_id`) REFERENCES `shipment` (`shipment_id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 17. Billing Invoices (SRS 7.7 / ERD #16)
+CREATE TABLE IF NOT EXISTS `billing_invoices` (
+    `invoice_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `invoice_no` VARCHAR(25) NOT NULL UNIQUE,
+    `shipment_id` INT NOT NULL,
+    `consumer_id` INT NOT NULL,
+    `seller_id` INT NOT NULL,
+    `sub_total` DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `tax_amount` DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    `total_amount` DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `paid_amount` DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `status` ENUM('UNPAID', 'PARTIAL', 'PAID', 'OVERDUE') NOT NULL DEFAULT 'UNPAID',
+    `issue_date` DATE NOT NULL,
+    `due_date` DATE NOT NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_invoice_shipment` FOREIGN KEY (`shipment_id`) REFERENCES `shipment` (`shipment_id`) ON DELETE RESTRICT,
+    CONSTRAINT `fk_dummy_invoice_consumer` FOREIGN KEY (`consumer_id`) REFERENCES `customers` (`customer_id`) ON DELETE RESTRICT,
+    CONSTRAINT `fk_dummy_invoice_seller` FOREIGN KEY (`seller_id`) REFERENCES `companies` (`company_id`) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 18. Invoice Line Items (SRS 7.7 / ERD #17)
+CREATE TABLE IF NOT EXISTS `invoice_line_items` (
+    `item_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `invoice_id` INT NOT NULL,
+    `item_type` ENUM('FREIGHT', 'HANDLING', 'PORT', 'CUSTOMS', 'TAX', 'OTHER') NOT NULL,
+    `description` VARCHAR(255) NOT NULL,
+    `quantity` INT NOT NULL DEFAULT 1,
+    `unit_price` DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    `amount` DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_line_invoice` FOREIGN KEY (`invoice_id`) REFERENCES `billing_invoices` (`invoice_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 19. Payments (SRS 7.7 / ERD #19)
+CREATE TABLE IF NOT EXISTS `payments` (
+    `payment_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `invoice_id` INT NOT NULL,
+    `amount` DECIMAL(14, 2) NOT NULL,
+    `payment_mode` ENUM('BANK_TRANSFER', 'CREDIT_CARD', 'LETTER_OF_CREDIT') NOT NULL,
+    `reference_no` VARCHAR(60) NULL,
+    `payment_date` DATE NOT NULL,
+    `recorded_by` INT NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_payment_invoice` FOREIGN KEY (`invoice_id`) REFERENCES `billing_invoices` (`invoice_id`) ON DELETE RESTRICT,
+    CONSTRAINT `fk_dummy_payment_user` FOREIGN KEY (`recorded_by`) REFERENCES `users` (`user_id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 20. Claims (SRS 7.8 / ERD #20)
+CREATE TABLE IF NOT EXISTS `claims` (
+    `claim_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `claim_no` VARCHAR(20) NOT NULL UNIQUE,
+    `shipment_id` INT NOT NULL,
+    `container_id` INT NULL,
+    `consumer_id` INT NOT NULL,
+    `claim_type` ENUM('LOSS', 'DAMAGE', 'DELAY', 'SHORTAGE') NOT NULL,
+    `description` TEXT NOT NULL,
+    `claimed_amount` DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    `approved_amount` DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    `status` ENUM('SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'PARTIALLY_APPROVED', 'REJECTED', 'SETTLED') NOT NULL DEFAULT 'SUBMITTED',
+    `seller_remarks` VARCHAR(255) NULL,
+    `raised_at` DATETIME NULL,
+    `settled_at` DATETIME NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_claim_shipment` FOREIGN KEY (`shipment_id`) REFERENCES `shipment` (`shipment_id`) ON DELETE RESTRICT,
+    CONSTRAINT `fk_dummy_claim_consumer` FOREIGN KEY (`consumer_id`) REFERENCES `customers` (`customer_id`) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 21. Claim Documents (SRS 7.8 / ERD #25)
+CREATE TABLE IF NOT EXISTS `claim_documents` (
+    `doc_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `claim_id` INT NOT NULL,
+    `file_path` VARCHAR(255) NOT NULL,
+    `file_type` VARCHAR(50) NULL,
+    `uploaded_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_claim_doc` FOREIGN KEY (`claim_id`) REFERENCES `claims` (`claim_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 22. Claim Status History (SRS 7.8)
+CREATE TABLE IF NOT EXISTS `claim_status_history` (
+    `history_id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `claim_id` INT NOT NULL,
+    `old_status` VARCHAR(20) NULL,
+    `new_status` VARCHAR(20) NULL,
+    `changed_by` INT NULL,
+    `remarks` VARCHAR(255) NULL,
+    `changed_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_claim_hist` FOREIGN KEY (`claim_id`) REFERENCES `claims` (`claim_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 23. Shipment Costs (Checklist Query 7.10)
+CREATE TABLE IF NOT EXISTS `shipment_costs` (
+    `cost_id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `shipment_id` INT NOT NULL,
+    `cost_type` ENUM('FREIGHT', 'PORT', 'HANDLING', 'CUSTOMS', 'INSURANCE', 'OTHER') NOT NULL,
+    `amount` DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `description` VARCHAR(255) NULL,
+    `cost_date` DATE NOT NULL,
+    `recorded_by` INT NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_sc_shipment` FOREIGN KEY (`shipment_id`) REFERENCES `shipment`(`shipment_id`) ON DELETE CASCADE,
+    INDEX `idx_dummy_sc_shipment_type` (`shipment_id`, `cost_type`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 24. Shipment Stock Reservations (FR4.7 Trigger Support)
+CREATE TABLE IF NOT EXISTS `shipment_stock_reservations` (
+    `reservation_id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `shipment_id` INT NOT NULL,
+    `product_id` INT NOT NULL,
+    `reserved_quantity` INT NOT NULL,
+    `status` ENUM('RESERVED','CONSUMED','RELEASED') NOT NULL DEFAULT 'RESERVED',
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_dummy_res_shipment` (`shipment_id`),
+    INDEX `idx_dummy_res_product` (`product_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 25. Tax Rates (Supporting Table)
+CREATE TABLE IF NOT EXISTS `tax_rates` (
+    `tax_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `tax_name` VARCHAR(50) NOT NULL,
+    `rate_pct` DECIMAL(5, 2) NOT NULL,
+    `is_active` TINYINT(1) NOT NULL DEFAULT 1
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 26. System Settings (Supporting Table)
+CREATE TABLE IF NOT EXISTS `system_settings` (
+    `setting_key` VARCHAR(50) PRIMARY KEY,
+    `setting_value` VARCHAR(255) NOT NULL,
+    `description` VARCHAR(255) NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 27. Claim Comments (Supporting Table)
+CREATE TABLE IF NOT EXISTS `claim_comments` (
+    `comment_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `claim_id` INT NOT NULL,
+    `user_id` INT NOT NULL,
+    `comment_text` TEXT NOT NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 28. Demand Forecast (ERD #8 / SRS Section 7.5 for FR6.6)
+CREATE TABLE IF NOT EXISTS `demand_forecast` (
+    `forecast_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `origin_port_id` INT NOT NULL,
+    `dest_port_id` INT NOT NULL,
+    `container_type` ENUM('DRY', 'REEFER', 'OPEN_TOP', 'TANK') NOT NULL,
+    `forecast_month` DATE NOT NULL,
+    `predicted_bookings` INT NOT NULL DEFAULT 0,
+    `confidence_pct` DECIMAL(5, 2) NOT NULL DEFAULT 0.00,
+    `suggested_multiplier` DECIMAL(4, 2) NOT NULL DEFAULT 1.00,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_dummy_df_orig_port` FOREIGN KEY (`origin_port_id`) REFERENCES `ports`(`port_id`) ON DELETE CASCADE,
+    CONSTRAINT `fk_dummy_df_dest_port` FOREIGN KEY (`dest_port_id`) REFERENCES `ports`(`port_id`) ON DELETE CASCADE,
+    CONSTRAINT `chk_dummy_df_confidence` CHECK (`confidence_pct` BETWEEN 0.00 AND 100.00),
+    CONSTRAINT `chk_dummy_df_bookings` CHECK (`predicted_bookings` >= 0),
+    CONSTRAINT `chk_dummy_df_mult` CHECK (`suggested_multiplier` > 0.00),
+    UNIQUE KEY `uq_dummy_demand_forecast_route` (`origin_port_id`, `dest_port_id`, `container_type`, `forecast_month`),
+    INDEX `idx_dummy_df_lookup` (`origin_port_id`, `dest_port_id`, `forecast_month`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
+-- =============================================================================
+-- STEP 2: REALISTIC DUMMY OPERATIONAL SEED DATA
+-- =============================================================================
+
+-- 1. Ports
+INSERT INTO `ports` (`port_id`, `port_code`, `port_name`, `city`, `country`, `latitude`, `longitude`, `is_active`) VALUES
+(1, 'INNSA', 'Jawaharlal Nehru Port (Nhava Sheva)', 'Navi Mumbai', 'India', 18.9499, 72.9511, 1),
+(2, 'AEJEA', 'Jebel Ali Port', 'Dubai', 'United Arab Emirates', 25.0069, 55.0600, 1),
+(3, 'SGSIN', 'Port of Singapore', 'Singapore', 'Singapore', 1.2644, 103.8398, 1),
+(4, 'NLRTM', 'Port of Rotterdam', 'Rotterdam', 'Netherlands', 51.9054, 4.4666, 1),
+(5, 'CNSHG', 'Port of Shanghai', 'Shanghai', 'China', 31.2304, 121.4737, 1)
+ON DUPLICATE KEY UPDATE `port_name` = VALUES(`port_name`);
+
+-- 2. Companies
+INSERT INTO `companies` (`company_id`, `company_name`, `company_type`, `gst_number`, `iec_code`, `address`, `city`, `country`) VALUES
+(1, 'Apex Global Logistics Ltd', 'SELLER', '27AAACA1234A1Z5', '0301002345', 'Plot 42, Port Industrial Estate', 'Navi Mumbai', 'India'),
+(2, 'Maritime Blue Ocean Exporters', 'SELLER', '24AAACB5678B1Z6', '0402008765', 'Wharf Road, Kandla Port Area', 'Gandhidham', 'India'),
+(3, 'EuroAsia Retail Imports BV', 'CONSUMER', 'NL894726190B01', 'NL12345678', 'Keizersgracht 450', 'Amsterdam', 'Netherlands'),
+(4, 'Gulf Traders LLC', 'CONSUMER', 'AE1002938475001', 'AE98765432', 'Al Mina Street, Deira', 'Dubai', 'United Arab Emirates'),
+(5, 'Pacific Horizon Consumer Goods', 'CONSUMER', 'SG201938472M', 'SG11223344', '10 Marina Boulevard', 'Singapore', 'Singapore')
+ON DUPLICATE KEY UPDATE `company_name` = VALUES(`company_name`);
+
+-- 3. Users
+INSERT INTO `users` (`user_id`, `role`, `company_id`, `full_name`, `email`, `password_hash`, `phone`, `status`) VALUES
+(1, 'ADMIN', NULL, 'System Administrator', 'admin@nlogistic.com', '$2a$10$abcdefghijklmnopqrstuv', '+919800000001', 'ACTIVE'),
+(2, 'SELLER', 1, 'Rajesh Sharma (Apex Global)', 'rajesh@apexlogistics.com', '$2a$10$abcdefghijklmnopqrstuv', '+919800000002', 'ACTIVE'),
+(3, 'SELLER', 2, 'Karan Patel (Maritime Blue)', 'karan@maritimeblue.com', '$2a$10$abcdefghijklmnopqrstuv', '+919800000003', 'ACTIVE'),
+(4, 'CONSUMER', 3, 'Jan van Dijk (EuroAsia)', 'jan@euroasia.nl', '$2a$10$abcdefghijklmnopqrstuv', '+31201234567', 'ACTIVE'),
+(5, 'CONSUMER', 4, 'Ahmed Al-Maktoum (Gulf Traders)', 'ahmed@gulftraders.ae', '$2a$10$abcdefghijklmnopqrstuv', '+97142345678', 'ACTIVE')
+ON DUPLICATE KEY UPDATE `full_name` = VALUES(`full_name`);
+
+-- 4. Customers
+INSERT INTO `customers` (`customer_id`, `user_id`, `company_id`, `contact_person`, `billing_address`, `credit_limit`) VALUES
+(1, 4, 3, 'Jan van Dijk', 'Keizersgracht 450, Amsterdam, Netherlands', 500000.00),
+(2, 5, 4, 'Ahmed Al-Maktoum', 'Al Mina Street, Deira, Dubai, UAE', 750000.00)
+ON DUPLICATE KEY UPDATE `contact_person` = VALUES(`contact_person`);
+
+-- 5. Vessels
+INSERT INTO `vessels` (`vessel_id`, `vessel_name`, `imo_number`, `owner_company_id`, `capacity_teu`, `status`) VALUES
+(1, 'MV Ocean Pioneer', 'IMO9123456', 1, 4500, 'ACTIVE'),
+(2, 'MV Northern Star', 'IMO9234567', 1, 6000, 'ACTIVE'),
+(3, 'MV Arabian Express', 'IMO9345678', 2, 3800, 'ACTIVE')
+ON DUPLICATE KEY UPDATE `vessel_name` = VALUES(`vessel_name`);
+
+-- 6. Containers
+INSERT INTO `containers` (`container_id`, `container_number`, `seller_id`, `container_type`, `size_ft`, `max_weight_kg`, `max_volume_cbm`, `current_port_id`, `status`) VALUES
+(1, 'APXU1234567', 1, 'DRY', 20, 24000.00, 33.20, 1, 'IN_TRANSIT'),
+(2, 'APXU2345678', 1, 'REEFER', 40, 30480.00, 67.50, 1, 'IN_TRANSIT'),
+(3, 'APXU3456789', 1, 'DRY', 40, 30480.00, 67.70, 2, 'AVAILABLE'),
+(4, 'MBLU4567890', 2, 'OPEN_TOP', 20, 24000.00, 32.00, 3, 'AVAILABLE'),
+(5, 'MBLU5678901', 2, 'TANK', 20, 26000.00, 26.00, 4, 'AVAILABLE'),
+(6, 'MBLU6789012', 2, 'DRY', 40, 30480.00, 67.70, 1, 'AVAILABLE')
+ON DUPLICATE KEY UPDATE `status` = VALUES(`status`);
+
+-- 7. Products (With actual unit_cost per Checklist Section 4.7)
+INSERT INTO `products` (`product_id`, `sku`, `product_name`, `category`, `hs_code`, `unit`, `unit_weight_kg`, `unit_volume_cbm`, `unit_price`, `unit_cost`, `owner_company_id`, `is_active`) VALUES
+(1, 'TEX-COT-001', 'Premium Cotton Textiles', 'Textiles', '5208.11', 'bale', 25.000, 0.4500, 12000.00, 7800.00, 1, 1),
+(2, 'SPICE-PEP-002', 'Organic Black Pepper', 'Agricultural Spices', '0904.11', 'kg', 1.000, 0.0200, 850.00, 552.50, 1, 1),
+(3, 'TEA-DAR-003', 'Darjeeling First Flush Tea', 'Beverages', '0902.10', 'box', 10.000, 0.1750, 5400.00, 3510.00, 1, 1),
+(4, 'ENG-STL-004', 'Precision Steel Bearings', 'Industrial Machinery', '8482.10', 'crate', 15.000, 0.0933, 3200.00, 2080.00, 2, 1),
+(5, 'MED-API-005', 'Active Pharma Ingredients', 'Pharmaceuticals', '2933.39', 'drum', 15.000, 0.1800, 45000.00, 29250.00, 2, 1),
+(6, 'AUTO-RAD-006', 'Automotive Radiators', 'Automotive', '8708.91', 'unit', 10.000, 0.1200, 6500.00, 4225.00, 2, 1)
+ON DUPLICATE KEY UPDATE `unit_price` = VALUES(`unit_price`), `unit_cost` = VALUES(`unit_cost`);
+
+-- 8. Stock
+INSERT INTO `stock` (`stock_id`, `product_id`, `shipment_id`, `container_id`, `quantity`, `damaged_qty`) VALUES
+(1, 1, 1, 1, 500, 5),
+(2, 2, 2, 2, 3000, 20),
+(3, 3, 3, 3, 800, 0),
+(4, 4, 4, 4, 1200, 10),
+(5, 5, 5, 5, 400, 0),
+(6, 6, 6, 6, 650, 2)
+ON DUPLICATE KEY UPDATE `quantity` = VALUES(`quantity`);
+
+-- 9. Inventory Ledger
+INSERT INTO `inventory_ledger` (`ledger_id`, `stock_id`, `product_id`, `txn_type`, `quantity`, `balance_after`, `reference_type`, `reference_id`, `txn_time`) VALUES
+(1, 1, 1, 'IN', 600, 600, 'UPLOAD', 101, '2026-08-01 09:00:00'),
+(2, 1, 1, 'OUT', 100, 500, 'SHIPMENT', 1, '2026-08-15 14:00:00'),
+(3, 2, 2, 'IN', 4000, 4000, 'UPLOAD', 102, '2026-08-01 09:30:00'),
+(4, 2, 2, 'OUT', 1000, 3000, 'SHIPMENT', 2, '2026-09-02 11:00:00'),
+(5, 3, 3, 'IN', 1000, 1000, 'UPLOAD', 103, '2026-09-01 10:00:00'),
+(6, 3, 3, 'OUT', 200, 800, 'SHIPMENT', 3, '2026-09-18 16:30:00'),
+(7, 4, 4, 'IN', 1500, 1500, 'UPLOAD', 104, '2026-09-15 09:00:00'),
+(8, 4, 4, 'OUT', 300, 1200, 'SHIPMENT', 4, '2026-10-18 10:00:00'),
+(9, 5, 5, 'IN', 500, 500, 'UPLOAD', 105, '2026-10-01 11:00:00'),
+(10, 5, 5, 'OUT', 100, 400, 'SHIPMENT', 5, '2026-10-28 14:00:00'),
+(11, 6, 6, 'IN', 650, 650, 'UPLOAD', 106, '2026-10-10 15:00:00'),
+(12, 1, 1, 'OUT', 50, 450, 'SHIPMENT', 1, '2026-10-20 12:00:00')
+ON DUPLICATE KEY UPDATE `quantity` = VALUES(`quantity`);
+
+-- 10. Pricing Rules
+INSERT INTO `pricing_rules` (`rule_id`, `seller_id`, `origin_port_id`, `dest_port_id`, `container_type`, `base_rate`, `rate_per_kg`, `rate_per_cbm`, `season_multiplier`, `demand_multiplier`, `valid_from`, `valid_to`, `is_active`) VALUES
+(1, 1, 1, 2, 'DRY', 120000.00, 2.5000, 45.00, 1.05, 1.10, '2026-01-01', '2026-12-31', 1),
+(2, 1, 1, 2, 'REEFER', 118000.00, 3.8000, 65.00, 1.10, 1.15, '2026-01-01', '2026-12-31', 1),
+(3, 1, 1, 4, 'DRY', 280000.00, 3.0000, 55.00, 1.00, 1.05, '2026-01-01', '2026-12-31', 1),
+(4, 2, 1, 2, 'OPEN_TOP', 118000.00, 4.0000, 70.00, 1.15, 1.20, '2026-01-01', '2026-12-31', 1),
+(5, 2, 1, 3, 'TANK', 145000.00, 5.0000, 85.00, 1.00, 1.00, '2026-01-01', '2026-12-31', 1),
+(6, 2, 1, 4, 'DRY', 275000.00, 3.2000, 58.00, 1.00, 1.00, '2026-01-01', '2026-12-31', 1)
+ON DUPLICATE KEY UPDATE `base_rate` = VALUES(`base_rate`);
+
+-- 11. Shipments
+INSERT INTO `shipment` (`shipment_id`, `shipment_no`, `consumer_id`, `seller_id`, `container_id`, `vessel_id`, `origin_port_id`, `dest_port_id`, `cargo_description`, `cargo_weight_kg`, `cargo_volume_cbm`, `quoted_price`, `status`, `etd`, `eta`, `actual_arrival`) VALUES
+(1, 'SHP-2026-0001', 2, 1, 1, 1, 1, 2, 'Cotton Textiles Export to Jebel Ali', 2500.00, 45.00, 165000.00, 'IN_TRANSIT', '2026-11-05', '2026-11-18', NULL),
+(2, 'SHP-2026-0002', 2, 1, 2, 1, 1, 2, 'Organic Black Pepper to Dubai', 1000.00, 20.00, 140000.00, 'IN_TRANSIT', '2026-11-08', '2026-11-20', NULL),
+(3, 'SHP-2026-0003', 1, 1, 3, 2, 1, 4, 'Premium Darjeeling Tea to Rotterdam', 2000.00, 35.00, 310000.00, 'ARRIVED', '2026-10-15', '2026-11-10', '2026-11-11'),
+(4, 'SHP-2026-0004', 1, 1, 3, 2, 1, 4, 'Industrial Steel Bearings to EuroAsia', 4500.00, 28.00, 340000.00, 'DELIVERED', '2026-10-01', '2026-10-25', '2026-10-24'),
+(5, 'SHP-2026-0005', 2, 2, 4, 3, 1, 2, 'Bulk Pharma Ingredients to UAE', 1500.00, 18.00, 195000.00, 'BOOKED', '2026-11-25', '2026-12-05', NULL),
+(6, 'SHP-2026-0006', 2, 2, 5, 3, 1, 3, 'Automotive Radiators to Singapore', 1500.00, 18.00, 220000.00, 'LOADED', '2026-11-15', '2026-11-28', NULL)
+ON DUPLICATE KEY UPDATE `status` = VALUES(`status`);
+
+-- 12. Shipment Items
+INSERT INTO `shipment_items` (`item_id`, `shipment_id`, `product_id`, `quantity`, `unit_price`, `weight_kg`, `volume_cbm`, `amount`) VALUES
+(1, 1, 1, 100, 12000.00, 2500.00, 45.00, 1200000.00),
+(2, 2, 2, 1000, 850.00, 1000.00, 20.00, 850000.00),
+(3, 3, 3, 200, 5400.00, 2000.00, 35.00, 1080000.00),
+(4, 4, 4, 300, 3200.00, 4500.00, 28.00, 960000.00),
+(5, 5, 5, 100, 45000.00, 1500.00, 18.00, 4500000.00),
+(6, 6, 6, 150, 6500.00, 1500.00, 18.00, 975000.00)
+ON DUPLICATE KEY UPDATE `quantity` = VALUES(`quantity`);
+
+-- 13. Shipment Costs (Checklist Query 7.10)
+INSERT INTO `shipment_costs` (`shipment_id`, `cost_type`, `amount`, `description`, `cost_date`, `recorded_by`) VALUES
+(1, 'FREIGHT', 119000.00, 'Ocean Freight Mumbai to Jebel Ali', '2026-11-05', 1),
+(1, 'PORT', 5000.00, 'Port dues and terminal tariff', '2026-11-05', 1),
+(1, 'HANDLING', 3500.00, 'Stevedoring and container handling', '2026-11-05', 1),
+(2, 'FREIGHT', 119000.00, 'Ocean Freight Mumbai to Jebel Ali', '2026-11-08', 1),
+(2, 'PORT', 5000.00, 'Port dues and terminal tariff', '2026-11-08', 1),
+(2, 'HANDLING', 3500.00, 'Stevedoring and container handling', '2026-11-08', 1),
+(3, 'FREIGHT', 280000.00, 'Ocean Freight Mumbai to Rotterdam', '2026-10-15', 1),
+(3, 'PORT', 5000.00, 'Port dues and terminal tariff', '2026-10-15', 1),
+(3, 'HANDLING', 3500.00, 'Stevedoring and container handling', '2026-10-15', 1),
+(4, 'FREIGHT', 280000.00, 'Ocean Freight Mumbai to Rotterdam', '2026-10-01', 1),
+(4, 'PORT', 5000.00, 'Port dues and terminal tariff', '2026-10-01', 1),
+(4, 'HANDLING', 3500.00, 'Stevedoring and container handling', '2026-10-01', 1),
+(5, 'FREIGHT', 119000.00, 'Ocean Freight Mumbai to Jebel Ali', '2026-11-25', 2),
+(5, 'PORT', 5000.00, 'Port dues and terminal tariff', '2026-11-25', 2),
+(5, 'HANDLING', 3500.00, 'Stevedoring and container handling', '2026-11-25', 2),
+(6, 'FREIGHT', 145000.00, 'Ocean Freight Mumbai to Singapore', '2026-11-15', 2),
+(6, 'PORT', 5000.00, 'Port dues and terminal tariff', '2026-11-15', 2),
+(6, 'HANDLING', 3500.00, 'Stevedoring and container handling', '2026-11-15', 2)
+ON DUPLICATE KEY UPDATE `amount` = VALUES(`amount`);
+
+-- 14. Sales Transactions
+INSERT INTO `sales_transactions` (`sale_id`, `product_id`, `customer_id`, `shipment_id`, `quantity`, `unit_price`, `total_amount`, `sale_date`) VALUES
+(1, 1, 2, 1, 100, 12000.00, 1200000.00, '2026-08-10'),
+(2, 2, 2, 2, 1000, 850.00, 850000.00, '2026-09-01'),
+(3, 3, 1, 3, 200, 5400.00, 1080000.00, '2026-09-15'),
+(4, 4, 1, 4, 300, 3200.00, 960000.00, '2026-10-15'),
+(5, 5, 2, 5, 100, 45000.00, 4500000.00, '2026-10-25'),
+(6, 6, 2, 6, 150, 6500.00, 975000.00, '2026-11-05'),
+(7, 1, 1, 1, 50, 12000.00, 600000.00, '2026-10-10')
+ON DUPLICATE KEY UPDATE `total_amount` = VALUES(`total_amount`);
+
+-- 15. Billing Invoices
+INSERT INTO `billing_invoices` (`invoice_id`, `invoice_no`, `shipment_id`, `consumer_id`, `seller_id`, `sub_total`, `tax_amount`, `total_amount`, `paid_amount`, `status`, `issue_date`, `due_date`) VALUES
+(1, 'INV-2026-0001', 1, 2, 1, 165000.00, 29700.00, 194700.00, 194700.00, 'PAID', '2026-11-05', '2026-12-05'),
+(2, 'INV-2026-0002', 2, 2, 1, 140000.00, 25200.00, 165200.00, 165200.00, 'PAID', '2026-11-08', '2026-12-08'),
+(3, 'INV-2026-0003', 3, 1, 1, 310000.00, 55800.00, 365800.00, 200000.00, 'PARTIAL', '2026-10-15', '2026-11-15'),
+(4, 'INV-2026-0004', 4, 1, 1, 340000.00, 61200.00, 401200.00, 365800.00, 'PARTIAL', '2026-10-01', '2026-11-01'),
+(5, 'INV-2026-0005', 5, 2, 2, 195000.00, 35100.00, 230100.00, 0.00, 'UNPAID', '2026-11-25', '2026-12-25'),
+(6, 'INV-2026-0006', 6, 2, 2, 220000.00, 39600.00, 259600.00, 0.00, 'UNPAID', '2026-11-15', '2026-12-15')
+ON DUPLICATE KEY UPDATE `paid_amount` = VALUES(`paid_amount`), `status` = VALUES(`status`);
+
+-- 16. Invoice Line Items
+INSERT INTO `invoice_line_items` (`item_id`, `invoice_id`, `item_type`, `description`, `quantity`, `unit_price`, `amount`) VALUES
+(1, 1, 'FREIGHT', 'Ocean Freight Mumbai to Jebel Ali', 1, 120000.00, 120000.00),
+(2, 1, 'PORT', 'Origin & Destination Port Dues', 1, 25000.00, 25000.00),
+(3, 1, 'HANDLING', 'Terminal Handling & Stevedoring Charges', 1, 20000.00, 20000.00),
+(4, 2, 'FREIGHT', 'Ocean Freight Mumbai to Jebel Ali (Reefer)', 1, 100000.00, 100000.00),
+(5, 3, 'FREIGHT', 'Ocean Freight Mumbai to Rotterdam', 1, 240000.00, 240000.00)
+ON DUPLICATE KEY UPDATE `amount` = VALUES(`amount`);
+
+-- 17. Payments
+INSERT INTO `payments` (`payment_id`, `invoice_id`, `amount`, `payment_mode`, `reference_no`, `payment_date`, `recorded_by`) VALUES
+(1, 1, 194700.00, 'LETTER_OF_CREDIT', 'LC-GULF-2026-001', '2026-11-06', 1),
+(2, 2, 165200.00, 'BANK_TRANSFER', 'NEFT202611080012', '2026-11-09', 1),
+(3, 3, 200000.00, 'BANK_TRANSFER', 'SWIFT20261016NL', '2026-10-16', 1),
+(4, 4, 365800.00, 'BANK_TRANSFER', 'SWIFT20261002NL', '2026-10-02', 1)
+ON DUPLICATE KEY UPDATE `amount` = VALUES(`amount`);
+
+-- 18. Claims
+INSERT INTO `claims` (`claim_id`, `claim_no`, `shipment_id`, `container_id`, `consumer_id`, `claim_type`, `description`, `claimed_amount`, `approved_amount`, `status`, `seller_remarks`, `raised_at`, `settled_at`) VALUES
+(1, 'CLM-2026-0001', 1, 1, 2, 'DAMAGE', 'Water ingress damage to cotton textile bales', 45000.00, 45000.00, 'SETTLED', 'Surveyor confirmed seal integrity breach; approved for full settlement', '2026-11-10 10:30:00', '2026-11-12 16:00:00'),
+(2, 'CLM-2026-0002', 3, 3, 1, 'DELAY', 'Perishable packaging damage due to 1-day port congestion delay', 20000.00, 20000.00, 'APPROVED', 'Delay verified via AIS carrier tracking; 100% claim approved', '2026-11-12 11:00:00', NULL),
+(3, 'CLM-2026-0003', 2, 2, 2, 'SHORTAGE', '1 carton short upon deconsolidation at Jebel Ali CFS', 8500.00, 0.00, 'UNDER_REVIEW', 'Awaiting tally report from CFS operator', '2026-11-13 14:00:00', NULL)
+ON DUPLICATE KEY UPDATE `status` = VALUES(`status`), `approved_amount` = VALUES(`approved_amount`);
+
+-- 19. Claim Status History
+INSERT INTO `claim_status_history` (`history_id`, `claim_id`, `old_status`, `new_status`, `changed_by`, `remarks`, `changed_at`) VALUES
+(1, 1, 'SUBMITTED', 'UNDER_REVIEW', 1, 'Investigation initiated with surveyor', '2026-11-10 11:00:00'),
+(2, 1, 'UNDER_REVIEW', 'APPROVED', 1, 'Survey report verified damage', '2026-11-11 15:00:00'),
+(3, 1, 'APPROVED', 'SETTLED', 1, 'Settlement payment issued to consumer', '2026-11-12 16:00:00'),
+(4, 2, 'SUBMITTED', 'APPROVED', 1, 'Carrier port delay confirmed', '2026-11-12 14:00:00')
+ON DUPLICATE KEY UPDATE `remarks` = VALUES(`remarks`);
+
+-- 20. Container Movements
+INSERT INTO `container_movements` (`movement_id`, `shipment_id`, `container_id`, `status`, `port_id`, `location_text`, `event_time`, `remarks`, `updated_by`) VALUES
+(1, 1, 1, 'BOOKED', 1, 'Nhava Sheva CFS Yard A', '2026-11-01 08:00:00', 'Container allocated and stuffed', 2),
+(2, 1, 1, 'LOADED', 1, 'Nhava Sheva Terminal 2', '2026-11-04 18:00:00', 'Loaded onto MV Ocean Pioneer', 2),
+(3, 1, 1, 'DEPARTED', 1, 'En route Arabian Sea', '2026-11-05 06:00:00', 'Vessel departed Nhava Sheva', 1),
+(4, 1, 1, 'IN_TRANSIT', NULL, 'Arabian Sea - Lat 19.5, Lon 65.2', '2026-11-08 12:00:00', 'AIS satellite fix confirmed normal cruise', 1),
+(5, 2, 2, 'DEPARTED', 1, 'Nhava Sheva', '2026-11-08 09:00:00', 'Departed on MV Ocean Pioneer', 2),
+(6, 3, 3, 'ARRIVED', 4, 'Port of Rotterdam', '2026-11-11 10:00:00', 'Vessel berthed at ECT Delta Terminal', 1),
+(7, 4, 3, 'DELIVERED', 4, 'EuroAsia Warehouse Amsterdam', '2026-10-24 16:00:00', 'Consignee signed Proof of Delivery', 1)
+ON DUPLICATE KEY UPDATE `remarks` = VALUES(`remarks`);
+
+-- 21. Demand Forecast Baseline
+INSERT INTO `demand_forecast` (`origin_port_id`, `dest_port_id`, `container_type`, `forecast_month`, `predicted_bookings`, `confidence_pct`, `suggested_multiplier`) VALUES
+(1, 2, 'DRY', '2026-12-01', 5, 88.00, 1.05),
+(1, 4, 'REEFER', '2026-12-01', 3, 65.00, 0.98),
+(1, 4, 'OPEN_TOP', '2026-12-01', 3, 65.00, 0.98),
+(1, 3, 'REEFER', '2026-12-01', 3, 65.00, 0.98)
+ON DUPLICATE KEY UPDATE `predicted_bookings` = VALUES(`predicted_bookings`);
+
+
+-- =============================================================================
+-- STEP 3: ANALYTICS SCHEMAS & TABLES (10 RESULT TABLES + SUPPORTING ENTITIES)
+-- =============================================================================
 
 -- 1. SALES TREND RESULT (ERD #10 / SRS 7.9 Table 5)
--- Purpose: Caches monthly route-wise sales trends & volume (FR6.2).
 CREATE TABLE IF NOT EXISTS `sales_trend_result` (
     `result_id`       INT AUTO_INCREMENT PRIMARY KEY,
-    `period_month`    DATE NOT NULL COMMENT 'First day of month (YYYY-MM-01)',
-    `origin_port_id`  INT NOT NULL COMMENT 'FK to ports',
-    `dest_port_id`    INT NOT NULL COMMENT 'FK to ports',
-    `total_sales`     DECIMAL(14, 2) NOT NULL DEFAULT 0.00 COMMENT 'Total realized route revenue',
-    `total_qty`       INT NOT NULL DEFAULT 0 COMMENT 'Total container volume or unit quantity',
-    `growth_pct`      DECIMAL(6, 2) NOT NULL DEFAULT 0.00 COMMENT 'Month-over-month growth rate %',
+    `period_month`    DATE NOT NULL,
+    `origin_port_id`  INT NOT NULL,
+    `dest_port_id`    INT NOT NULL,
+    `total_sales`     DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `total_qty`       INT NOT NULL DEFAULT 0,
+    `growth_pct`      DECIMAL(6, 2) NOT NULL DEFAULT 0.00,
     `created_at`      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT `fk_fr6_str_origin` FOREIGN KEY (`origin_port_id`) REFERENCES `ports`(`port_id`) ON DELETE CASCADE,
@@ -95,14 +684,13 @@ CREATE TABLE IF NOT EXISTS `sales_trend_result` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 2. ABC CLASSIFICATION RESULT (ERD #26 / SRS 7.9 Table 2)
--- Purpose: Caches Pareto inventory analysis per product (FR6.3).
 CREATE TABLE IF NOT EXISTS `abc_classification_result` (
     `result_id`       INT AUTO_INCREMENT PRIMARY KEY,
-    `product_id`      INT NOT NULL COMMENT 'FK to products',
-    `annual_value`    DECIMAL(14, 2) NOT NULL DEFAULT 0.00 COMMENT 'Annualized product sales value',
-    `cumulative_pct`  DECIMAL(5, 2) NOT NULL DEFAULT 0.00 COMMENT 'Running cumulative revenue % (0-100)',
-    `abc_class`       CHAR(1) NOT NULL COMMENT 'Category: A = top 70%, B = next 20%, C = last 10%',
-    `calculated_on`   DATE NOT NULL COMMENT 'Date of Pareto classification run',
+    `product_id`      INT NOT NULL,
+    `annual_value`    DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `cumulative_pct`  DECIMAL(5, 2) NOT NULL DEFAULT 0.00,
+    `abc_class`       CHAR(1) NOT NULL,
+    `calculated_on`   DATE NOT NULL,
     `created_at`      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT `fk_fr6_abc_prod` FOREIGN KEY (`product_id`) REFERENCES `products`(`product_id`) ON DELETE CASCADE,
@@ -114,15 +702,14 @@ CREATE TABLE IF NOT EXISTS `abc_classification_result` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 3. INVENTORY TURNOVER RESULT (ERD #27 / SRS 7.9 Table 3)
--- Purpose: Caches inventory velocity and turnover metrics (FR6.4).
 CREATE TABLE IF NOT EXISTS `inventory_turnover_result` (
     `result_id`       INT AUTO_INCREMENT PRIMARY KEY,
-    `product_id`      INT NOT NULL COMMENT 'FK to products',
+    `product_id`      INT NOT NULL,
     `period_start`    DATE NOT NULL,
     `period_end`      DATE NOT NULL,
-    `cogs`            DECIMAL(14, 2) NOT NULL DEFAULT 0.00 COMMENT 'Cost of Goods Sold (ledger OUT)',
-    `avg_inventory`   DECIMAL(14, 2) NOT NULL DEFAULT 0.00 COMMENT 'Average stock valuation over period',
-    `turnover_ratio`  DECIMAL(8, 2) NOT NULL DEFAULT 0.00 COMMENT 'turnover_ratio = cogs / avg_inventory',
+    `cogs`            DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `avg_inventory`   DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `turnover_ratio`  DECIMAL(8, 2) NOT NULL DEFAULT 0.00,
     `created_at`      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT `fk_fr6_turnover_prod` FOREIGN KEY (`product_id`) REFERENCES `products`(`product_id`) ON DELETE CASCADE,
@@ -134,14 +721,13 @@ CREATE TABLE IF NOT EXISTS `inventory_turnover_result` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 4. PROFITABILITY RESULT (ERD #28 / SRS 7.9 Table 4)
--- Purpose: Caches monthly gross profitability margins per product (FR6.5).
 CREATE TABLE IF NOT EXISTS `profitability_result` (
     `result_id`       INT AUTO_INCREMENT PRIMARY KEY,
-    `product_id`      INT NOT NULL COMMENT 'FK to products',
-    `period_month`    DATE NOT NULL COMMENT 'First day of month (YYYY-MM-01)',
-    `revenue`         DECIMAL(14, 2) NOT NULL DEFAULT 0.00 COMMENT 'Gross revenue realized for product',
-    `cost`            DECIMAL(14, 2) NOT NULL DEFAULT 0.00 COMMENT 'Actual COGS using unit_cost',
-    `margin_pct`      DECIMAL(6, 2) NOT NULL DEFAULT 0.00 COMMENT 'Gross profit margin %',
+    `product_id`      INT NOT NULL,
+    `period_month`    DATE NOT NULL,
+    `revenue`         DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `cost`            DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `margin_pct`      DECIMAL(6, 2) NOT NULL DEFAULT 0.00,
     `created_at`      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT `fk_fr6_profit_prod` FOREIGN KEY (`product_id`) REFERENCES `products`(`product_id`) ON DELETE CASCADE,
@@ -153,19 +739,17 @@ CREATE TABLE IF NOT EXISTS `profitability_result` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 5. PROFIT LOSS (ERD #11 / SRS 7.9 Table 1)
--- Purpose: Shipment-level and monthly financial records (FR6.5 & FR2.8).
--- Formula: net_profit = revenue - freight_cost - port_cost - handling_cost - claim_loss.
--- Note: Implements net_profit as a STORED GENERATED column per Checklist Section 8.
+-- Rule: Implements net_profit as a STORED GENERATED column per Checklist Section 8.
 CREATE TABLE IF NOT EXISTS `profit_loss` (
     `pl_id`           INT AUTO_INCREMENT PRIMARY KEY,
-    `shipment_id`     INT NULL COMMENT 'Nullable for consolidated seller month baseline',
-    `seller_id`       INT NOT NULL COMMENT 'FK to users(user_id) with role SELLER',
-    `period_month`    DATE NOT NULL COMMENT 'First day of month (YYYY-MM-01)',
-    `revenue`         DECIMAL(14, 2) NOT NULL DEFAULT 0.00 COMMENT 'Paid / Invoiced revenue',
-    `freight_cost`    DECIMAL(14, 2) NOT NULL DEFAULT 0.00 COMMENT 'Ocean freight operating expense',
-    `port_cost`       DECIMAL(14, 2) NOT NULL DEFAULT 0.00 COMMENT 'Port dues & terminal fees',
-    `handling_cost`   DECIMAL(14, 2) NOT NULL DEFAULT 0.00 COMMENT 'Stevedoring & container handling',
-    `claim_loss`      DECIMAL(14, 2) NOT NULL DEFAULT 0.00 COMMENT 'Settled approved claim payouts',
+    `shipment_id`     INT NULL,
+    `seller_id`       INT NOT NULL,
+    `period_month`    DATE NOT NULL,
+    `revenue`         DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `freight_cost`    DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `port_cost`       DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `handling_cost`   DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `claim_loss`      DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
     `net_profit`      DECIMAL(14, 2) GENERATED ALWAYS AS (revenue - freight_cost - port_cost - handling_cost - claim_loss) STORED,
     `created_at`      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -175,47 +759,14 @@ CREATE TABLE IF NOT EXISTS `profit_loss` (
     INDEX `idx_pl_seller_month` (`seller_id`, `period_month`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Ensure net_profit is STORED GENERATED if the table already existed
-ALTER TABLE `profit_loss` 
-MODIFY COLUMN `net_profit` DECIMAL(14, 2) 
-GENERATED ALWAYS AS (revenue - freight_cost - port_cost - handling_cost - claim_loss) STORED;
-
--- 6. DEMAND FORECAST (ERD #8 / SRS Section 7.5 for FR6.6)
--- Purpose: Route & container demand forecasting to dynamically guide pricing.
-CREATE TABLE IF NOT EXISTS `demand_forecast` (
-    `forecast_id`          INT AUTO_INCREMENT PRIMARY KEY,
-    `origin_port_id`       INT NOT NULL,
-    `dest_port_id`         INT NOT NULL,
-    `container_type`       ENUM('DRY', 'REEFER', 'OPEN_TOP', 'TANK') NOT NULL,
-    `forecast_month`       DATE NOT NULL COMMENT 'First day of target month (YYYY-MM-01)',
-    `predicted_bookings`   INT NOT NULL DEFAULT 0,
-    `confidence_pct`       DECIMAL(5, 2) NOT NULL DEFAULT 0.00,
-    `suggested_multiplier` DECIMAL(4, 2) NOT NULL DEFAULT 1.00,
-    `created_at`           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT `fk_df_orig_port` FOREIGN KEY (`origin_port_id`) REFERENCES `ports`(`port_id`) ON DELETE CASCADE,
-    CONSTRAINT `fk_df_dest_port` FOREIGN KEY (`dest_port_id`) REFERENCES `ports`(`port_id`) ON DELETE CASCADE,
-    CONSTRAINT `chk_df_confidence` CHECK (`confidence_pct` BETWEEN 0.00 AND 100.00),
-    CONSTRAINT `chk_df_bookings_nonneg` CHECK (`predicted_bookings` >= 0),
-    CONSTRAINT `chk_df_multiplier_pos` CHECK (`suggested_multiplier` > 0.00),
-    UNIQUE KEY `uq_demand_forecast_route` (`origin_port_id`, `dest_port_id`, `container_type`, `forecast_month`),
-    INDEX `idx_df_lookup` (`origin_port_id`, `dest_port_id`, `forecast_month`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
--- -----------------------------------------------------------------------------
--- 1.2 ADDITIONAL SUPPORTING ANALYTICS TABLES (CHECKLIST SECTION 1.2)
--- -----------------------------------------------------------------------------
-
--- 7. CUSTOMER ABC CLASSIFICATION RESULT (Checklist Table 1 / FR6.3)
--- Purpose: Caches annual customer contribution Pareto analysis (A=70%, B=20%, C=10%).
+-- 6. CUSTOMER ABC CLASSIFICATION RESULT (Checklist Table 1 / FR6.3)
 CREATE TABLE IF NOT EXISTS `customer_abc_classification_result` (
     `result_id`       INT AUTO_INCREMENT PRIMARY KEY,
-    `customer_id`     INT NOT NULL COMMENT 'FK to customers',
-    `annual_value`    DECIMAL(14, 2) NOT NULL DEFAULT 0.00 COMMENT 'Annual spending total across all shipments',
-    `cumulative_pct`  DECIMAL(5, 2) NOT NULL DEFAULT 0.00 COMMENT 'Cumulative portfolio revenue % (0-100)',
-    `abc_class`       CHAR(1) NOT NULL COMMENT 'A = top 70%, B = next 20%, C = last 10%',
-    `calculated_on`   DATE NOT NULL COMMENT 'Date Pareto analysis was calculated',
+    `customer_id`     INT NOT NULL,
+    `annual_value`    DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `cumulative_pct`  DECIMAL(5, 2) NOT NULL DEFAULT 0.00,
+    `abc_class`       CHAR(1) NOT NULL,
+    `calculated_on`   DATE NOT NULL,
     `created_at`      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT `fk_fr6_cabc_customer` FOREIGN KEY (`customer_id`) REFERENCES `customers`(`customer_id`) ON DELETE CASCADE,
@@ -226,15 +777,14 @@ CREATE TABLE IF NOT EXISTS `customer_abc_classification_result` (
     INDEX `idx_customer_abc_calc_lookup` (`customer_id`, `calculated_on`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 8. SALES TREND PRODUCT RESULT (Checklist Table 2 / FR6.2)
--- Purpose: Caches monthly product-wise sales revenue, quantity, and growth %.
+-- 7. SALES TREND PRODUCT RESULT (Checklist Table 2 / FR6.2)
 CREATE TABLE IF NOT EXISTS `sales_trend_product_result` (
     `result_id`       INT AUTO_INCREMENT PRIMARY KEY,
-    `product_id`      INT NOT NULL COMMENT 'FK to products',
-    `period_month`    DATE NOT NULL COMMENT 'First day of month (YYYY-MM-01)',
-    `total_sales`     DECIMAL(14, 2) NOT NULL DEFAULT 0.00 COMMENT 'Gross revenue realized for product',
-    `total_qty`       INT NOT NULL DEFAULT 0 COMMENT 'Total units sold/shipped',
-    `growth_pct`      DECIMAL(6, 2) NOT NULL DEFAULT 0.00 COMMENT 'MoM product sales growth rate %',
+    `product_id`      INT NOT NULL,
+    `period_month`    DATE NOT NULL,
+    `total_sales`     DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `total_qty`       INT NOT NULL DEFAULT 0,
+    `growth_pct`      DECIMAL(6, 2) NOT NULL DEFAULT 0.00,
     `created_at`      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT `fk_fr6_stpr_product` FOREIGN KEY (`product_id`) REFERENCES `products`(`product_id`) ON DELETE CASCADE,
@@ -244,15 +794,14 @@ CREATE TABLE IF NOT EXISTS `sales_trend_product_result` (
     INDEX `idx_sales_trend_prod_month` (`period_month`, `product_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 9. SALES TREND CUSTOMER RESULT (Checklist Table 3 / FR6.2)
--- Purpose: Caches monthly customer-wise sales revenue, quantity, and growth %.
+-- 8. SALES TREND CUSTOMER RESULT (Checklist Table 3 / FR6.2)
 CREATE TABLE IF NOT EXISTS `sales_trend_customer_result` (
     `result_id`       INT AUTO_INCREMENT PRIMARY KEY,
-    `customer_id`     INT NOT NULL COMMENT 'FK to customers',
-    `period_month`    DATE NOT NULL COMMENT 'First day of month (YYYY-MM-01)',
-    `total_sales`     DECIMAL(14, 2) NOT NULL DEFAULT 0.00 COMMENT 'Gross spend by customer this month',
-    `total_qty`       INT NOT NULL DEFAULT 0 COMMENT 'Total units purchased',
-    `growth_pct`      DECIMAL(6, 2) NOT NULL DEFAULT 0.00 COMMENT 'MoM customer spend growth rate %',
+    `customer_id`     INT NOT NULL,
+    `period_month`    DATE NOT NULL,
+    `total_sales`     DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `total_qty`       INT NOT NULL DEFAULT 0,
+    `growth_pct`      DECIMAL(6, 2) NOT NULL DEFAULT 0.00,
     `created_at`      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT `fk_fr6_stcr_customer` FOREIGN KEY (`customer_id`) REFERENCES `customers`(`customer_id`) ON DELETE CASCADE,
@@ -262,16 +811,15 @@ CREATE TABLE IF NOT EXISTS `sales_trend_customer_result` (
     INDEX `idx_sales_trend_cust_month` (`period_month`, `customer_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 10. SHIPMENT PROFITABILITY RESULT (Checklist Table 4 / FR6.5)
--- Purpose: Caches shipment-level revenue, direct costs, and gross operating margin %.
+-- 9. SHIPMENT PROFITABILITY RESULT (Checklist Table 4 / FR6.5)
 CREATE TABLE IF NOT EXISTS `shipment_profitability_result` (
     `result_id`       INT AUTO_INCREMENT PRIMARY KEY,
-    `shipment_id`     INT NOT NULL COMMENT 'FK to shipment',
-    `seller_id`       INT NOT NULL COMMENT 'FK to users(user_id)',
-    `period_month`    DATE NOT NULL COMMENT 'First day of month (YYYY-MM-01)',
-    `revenue`         DECIMAL(14, 2) NOT NULL DEFAULT 0.00 COMMENT 'Invoiced revenue',
-    `cost`            DECIMAL(14, 2) NOT NULL DEFAULT 0.00 COMMENT 'Total operating costs + settled claims',
-    `margin_pct`      DECIMAL(6, 2) NOT NULL DEFAULT 0.00 COMMENT 'Operating margin % = ((revenue-cost)/revenue)*100',
+    `shipment_id`     INT NOT NULL,
+    `seller_id`       INT NOT NULL,
+    `period_month`    DATE NOT NULL,
+    `revenue`         DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `cost`            DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+    `margin_pct`      DECIMAL(6, 2) NOT NULL DEFAULT 0.00,
     `created_at`      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT `fk_fr6_spr_shipment` FOREIGN KEY (`shipment_id`) REFERENCES `shipment`(`shipment_id`) ON DELETE CASCADE,
@@ -283,11 +831,10 @@ CREATE TABLE IF NOT EXISTS `shipment_profitability_result` (
     INDEX `idx_ship_profit_seller` (`seller_id`, `period_month`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 11. ANALYTICS STALENESS & LOGGING (Checklist Section 5 Supporting)
--- Purpose: Tracks cache staleness flags and execution logs for FR6.7.
+-- 10. ANALYTICS STALENESS & LOGGING
 CREATE TABLE IF NOT EXISTS `analytics_staleness` (
     `module_name`       VARCHAR(40) PRIMARY KEY,
-    `is_stale`          TINYINT(1) NOT NULL DEFAULT 1 COMMENT '1 = Needs recalculation, 0 = Fresh',
+    `is_stale`          TINYINT(1) NOT NULL DEFAULT 1,
     `last_refreshed_at` TIMESTAMP NULL,
     `stale_reason`      VARCHAR(255) NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -302,27 +849,14 @@ VALUES
     ('demand_forecast', 1, NULL, 'Initial load')
 ON DUPLICATE KEY UPDATE `is_stale` = VALUES(`is_stale`);
 
--- 12. SHIPMENT STOCK RESERVATIONS (Supporting Table for Stock Lifecycle Trigger)
-CREATE TABLE IF NOT EXISTS `shipment_stock_reservations` (
-    `reservation_id`    BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `shipment_id`       INT NOT NULL,
-    `product_id`        INT NOT NULL,
-    `reserved_quantity` INT NOT NULL,
-    `status`            ENUM('RESERVED','CONSUMED','RELEASED') NOT NULL DEFAULT 'RESERVED',
-    `created_at`        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    INDEX `idx_res_shipment` (`shipment_id`),
-    INDEX `idx_res_product` (`product_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Restore foreign key checks
+-- Restore foreign keys
 SET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;
 
 
 -- =============================================================================
--- SECTION 2: REQUIRED INDEXES & CONSTRAINTS (CHECKLIST SECTION 8)
+-- STEP 4: REQUIRED COMPOUND INDEXES & CONSTRAINTS (CHECKLIST SECTION 8)
 -- =============================================================================
 
--- Idempotent index creation helper procedure
 DROP PROCEDURE IF EXISTS `sp_create_index_if_not_exists`;
 DELIMITER //
 CREATE PROCEDURE `sp_create_index_if_not_exists`(
@@ -347,7 +881,6 @@ BEGIN
 END //
 DELIMITER ;
 
--- Apply all 11 compound indexes required by Checklist Section 8:
 CALL sp_create_index_if_not_exists('sales_transactions', 'idx_sales_txn_date_product', '`sale_date`, `product_id`');
 CALL sp_create_index_if_not_exists('sales_transactions', 'idx_sales_txn_date_customer', '`sale_date`, `customer_id`');
 CALL sp_create_index_if_not_exists('sales_transactions', 'idx_sales_txn_shipment_date', '`shipment_id`, `sale_date`');
@@ -364,14 +897,10 @@ DROP PROCEDURE IF EXISTS `sp_create_index_if_not_exists`;
 
 
 -- =============================================================================
--- SECTION 3: LIVE DATABASE VIEWS (8 VIEWS - CHECKLIST SECTION 3)
--- Purpose: Read directly from operational tables in real time whenever queried.
+-- STEP 5: LIVE DATABASE VIEWS (8 VIEWS - CHECKLIST SECTION 3)
 -- =============================================================================
 
--- -----------------------------------------------------------------------------
 -- LIVE VIEW 1: vw_fr6_kpi_live (Checklist 3.1 & 7.1)
--- Purpose: Unified real-time operational KPIs aggregated without Cartesian product.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `vw_fr6_kpi_live` AS
 SELECT 
     (SELECT COUNT(*) FROM `shipment` WHERE `status` NOT IN ('CANCELLED', 'DELIVERED')) AS active_shipments,
@@ -380,10 +909,7 @@ SELECT
     (SELECT COALESCE(SUM(`total_amount` - `paid_amount`), 0.00) FROM `billing_invoices` WHERE `status` <> 'PAID') AS pending_invoices,
     (SELECT COUNT(*) FROM `claims` WHERE `status` IN ('SUBMITTED', 'UNDER_REVIEW')) AS open_claims;
 
--- -----------------------------------------------------------------------------
 -- LIVE VIEW 2: vw_fr6_sales_route_live (Checklist 3.2 & 7.2)
--- Purpose: Live route-wise sales joining sales_transactions, shipment, origin/dest ports.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `vw_fr6_sales_route_live` AS
 SELECT 
     op.port_name AS origin_port,
@@ -399,10 +925,7 @@ JOIN ports dp ON s.dest_port_id = dp.port_id
 WHERE s.status != 'CANCELLED'
 GROUP BY op.port_name, dp.port_name, s.origin_port_id, s.dest_port_id;
 
--- -----------------------------------------------------------------------------
 -- LIVE VIEW 3: vw_fr6_sales_product_live (Checklist 3.3 & 7.3)
--- Purpose: Live product-wise sales revenue & volume joining sales_transactions & products.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `vw_fr6_sales_product_live` AS
 SELECT 
     p.product_id,
@@ -416,10 +939,7 @@ FROM sales_transactions st
 JOIN products p ON st.product_id = p.product_id
 GROUP BY p.product_id, p.sku, p.product_name, p.category, p.owner_company_id;
 
--- -----------------------------------------------------------------------------
 -- LIVE VIEW 4: vw_fr6_sales_customer_live (Checklist 3.4 & 7.4)
--- Purpose: Live customer-wise sales revenue & quantity joining sales, customers, users.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `vw_fr6_sales_customer_live` AS
 SELECT 
     cu.customer_id,
@@ -432,10 +952,7 @@ JOIN customers cu ON st.customer_id = cu.customer_id
 JOIN users u ON cu.user_id = u.user_id
 GROUP BY cu.customer_id, u.full_name, u.email;
 
--- -----------------------------------------------------------------------------
 -- LIVE VIEW 5: vw_fr6_inventory_live (Checklist 3.5)
--- Purpose: Live inventory balance and valuation per product, company, and stock row.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `vw_fr6_inventory_live` AS
 SELECT 
     p.product_id,
@@ -453,10 +970,7 @@ FROM products p
 JOIN companies c ON p.owner_company_id = c.company_id
 LEFT JOIN stock s ON p.product_id = s.product_id;
 
--- -----------------------------------------------------------------------------
 -- LIVE VIEW 6: vw_fr6_shipment_profitability_live (Checklist 3.6 & 7.10)
--- Purpose: Real-time shipment-level profitability comparing revenue, freight, and claims.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `vw_fr6_shipment_profitability_live` AS
 SELECT 
     s.shipment_id,
@@ -496,10 +1010,7 @@ LEFT JOIN billing_invoices bi ON s.shipment_id = bi.shipment_id
 LEFT JOIN pricing_rules pr ON s.origin_port_id = pr.origin_port_id AND s.dest_port_id = pr.dest_port_id
 WHERE s.status != 'CANCELLED';
 
--- -----------------------------------------------------------------------------
 -- LIVE VIEW 7: vw_fr6_seller_pnl_live (Checklist 3.7 & 7.9)
--- Purpose: Live P&L financial summary joining profit_loss, companies, and shipment.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `vw_fr6_seller_pnl_live` AS
 SELECT 
     pl.seller_id,
@@ -517,10 +1028,7 @@ JOIN users u ON pl.seller_id = u.user_id
 LEFT JOIN companies c ON u.company_id = c.company_id
 LEFT JOIN shipment s ON pl.shipment_id = s.shipment_id;
 
--- -----------------------------------------------------------------------------
 -- LIVE VIEW 8: vw_fr6_demand_forecast_live (Checklist 3.8 & 7.11)
--- Purpose: Live demand forecast joined twice with ports (origin & destination).
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `vw_fr6_demand_forecast_live` AS
 SELECT 
     df.forecast_id,
@@ -561,14 +1069,10 @@ GROUP BY period_month, seller_id, seller;
 
 
 -- =============================================================================
--- SECTION 4: CACHED-RESULT VIEWS (8 VIEWS - CHECKLIST SECTION 3)
--- Purpose: Pre-aggregated reporting views reading over the materialized cache tables.
+-- STEP 6: CACHED-RESULT VIEWS (8 VIEWS - CHECKLIST SECTION 3)
 -- =============================================================================
 
--- -----------------------------------------------------------------------------
 -- CACHED VIEW 1: vw_fr6_abc_product (Checklist Cached 1 & 7.5)
--- Purpose: Product Pareto ABC classification with product and owner details.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `vw_fr6_abc_product` AS
 SELECT 
     a.result_id,
@@ -585,10 +1089,7 @@ FROM abc_classification_result a
 JOIN products p ON a.product_id = p.product_id
 JOIN companies c ON p.owner_company_id = c.company_id;
 
--- -----------------------------------------------------------------------------
 -- CACHED VIEW 2: vw_fr6_abc_customer (Checklist Cached 2 & 7.6)
--- Purpose: Customer Pareto ABC classification with customer and user details.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `vw_fr6_abc_customer` AS
 SELECT 
     ca.result_id,
@@ -604,10 +1105,7 @@ FROM customer_abc_classification_result ca
 JOIN customers cu ON ca.customer_id = cu.customer_id
 JOIN users u ON cu.user_id = u.user_id;
 
--- -----------------------------------------------------------------------------
 -- CACHED VIEW 3: vw_fr6_inventory_turnover (Checklist Cached 3 & 7.7)
--- Purpose: Cached inventory velocity and turnover ratio per product.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `vw_fr6_inventory_turnover` AS
 SELECT 
     itr.result_id,
@@ -624,10 +1122,7 @@ SELECT
 FROM inventory_turnover_result itr
 JOIN products p ON itr.product_id = p.product_id;
 
--- -----------------------------------------------------------------------------
 -- CACHED VIEW 4: vw_fr6_product_profitability (Checklist Cached 4 & 7.8)
--- Purpose: Cached monthly product margin details based on actual unit_cost.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `vw_fr6_product_profitability` AS
 SELECT 
     pr.result_id,
@@ -643,10 +1138,7 @@ SELECT
 FROM profitability_result pr
 JOIN products p ON pr.product_id = p.product_id;
 
--- -----------------------------------------------------------------------------
 -- CACHED VIEW 5: vw_fr6_shipment_profitability (Checklist Cached 5)
--- Purpose: Cached shipment-level profitability with shipment number and seller name.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `vw_fr6_shipment_profitability` AS
 SELECT 
     spr.result_id,
@@ -663,10 +1155,7 @@ JOIN shipment s ON spr.shipment_id = s.shipment_id
 JOIN users u ON spr.seller_id = u.user_id
 LEFT JOIN companies c ON u.company_id = c.company_id;
 
--- -----------------------------------------------------------------------------
 -- CACHED VIEW 6: vw_fr6_sales_route_cached (Checklist Cached 6)
--- Purpose: Cached route sales performance & month-over-month growth trends.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `vw_fr6_sales_route_cached` AS
 SELECT 
     str.result_id,
@@ -687,10 +1176,7 @@ FROM sales_trend_result str
 JOIN ports op ON str.origin_port_id = op.port_id
 JOIN ports dp ON str.dest_port_id = dp.port_id;
 
--- -----------------------------------------------------------------------------
 -- CACHED VIEW 7: vw_fr6_sales_product_cached (Checklist Cached 7)
--- Purpose: Cached monthly product performance with sales growth indicator.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `vw_fr6_sales_product_cached` AS
 SELECT 
     stpr.result_id,
@@ -710,10 +1196,7 @@ SELECT
 FROM sales_trend_product_result stpr
 JOIN products p ON stpr.product_id = p.product_id;
 
--- -----------------------------------------------------------------------------
 -- CACHED VIEW 8: vw_fr6_sales_customer_cached (Checklist Cached 8)
--- Purpose: Cached monthly customer purchasing performance & buying trends.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `vw_fr6_sales_customer_cached` AS
 SELECT 
     stcr.result_id,
@@ -735,8 +1218,7 @@ JOIN users u ON cu.user_id = u.user_id;
 
 
 -- =============================================================================
--- SECTION 5: STORED PROCEDURES (12 PROCEDURES - CHECKLIST SECTION 4)
--- Purpose: Owns calculation, refresh, duplicate prevention, and caching logic.
+-- STEP 7: STORED PROCEDURES (12 PROCEDURES - CHECKLIST SECTION 4)
 -- =============================================================================
 
 DROP PROCEDURE IF EXISTS `sp_refresh_sales_trends`;
@@ -755,11 +1237,7 @@ DROP PROCEDURE IF EXISTS `sp_purge_historical_analytics_cache`;
 
 DELIMITER //
 
--- -----------------------------------------------------------------------------
 -- PROCEDURE 1: sp_refresh_sales_trends (Checklist 4.1)
--- Target Table: sales_trend_result (Table 1)
--- Formula: Growth% = ((Current Sales - Previous Sales) / Previous Sales) * 100
--- -----------------------------------------------------------------------------
 CREATE PROCEDURE `sp_refresh_sales_trends`()
 BEGIN
     INSERT INTO sales_trend_result (period_month, origin_port_id, dest_port_id, total_sales, total_qty, growth_pct)
@@ -799,11 +1277,7 @@ BEGIN
         growth_pct  = VALUES(growth_pct);
 END //
 
--- -----------------------------------------------------------------------------
 -- PROCEDURE 2: sp_calculate_product_sales_trends (Checklist 4.2)
--- Target Table: sales_trend_product_result (Table 2)
--- Purpose: Computes monthly product sales volume, revenue, and MoM growth %.
--- -----------------------------------------------------------------------------
 CREATE PROCEDURE `sp_calculate_product_sales_trends`()
 BEGIN
     INSERT INTO sales_trend_product_result (product_id, period_month, total_sales, total_qty, growth_pct)
@@ -839,11 +1313,7 @@ BEGIN
         growth_pct  = VALUES(growth_pct);
 END //
 
--- -----------------------------------------------------------------------------
 -- PROCEDURE 3: sp_calculate_customer_sales_trends (Checklist 4.3)
--- Target Table: sales_trend_customer_result (Table 3)
--- Purpose: Computes monthly customer spending volume and MoM spend growth %.
--- -----------------------------------------------------------------------------
 CREATE PROCEDURE `sp_calculate_customer_sales_trends`()
 BEGIN
     INSERT INTO sales_trend_customer_result (customer_id, period_month, total_sales, total_qty, growth_pct)
@@ -879,11 +1349,7 @@ BEGIN
         growth_pct  = VALUES(growth_pct);
 END //
 
--- -----------------------------------------------------------------------------
 -- PROCEDURE 4: sp_calculate_abc_classification (Checklist 4.4)
--- Target Table: abc_classification_result (Table 4)
--- Purpose: Computes Pareto classification: A (top 70%), B (next 20%), C (remaining 10%).
--- -----------------------------------------------------------------------------
 CREATE PROCEDURE `sp_calculate_abc_classification`()
 BEGIN
     DECLARE v_total_portfolio DECIMAL(14,2) DEFAULT 0.00;
@@ -920,11 +1386,7 @@ BEGIN
         abc_class      = VALUES(abc_class);
 END //
 
--- -----------------------------------------------------------------------------
 -- PROCEDURE 5: sp_calculate_customer_abc (Checklist 4.5)
--- Target Table: customer_abc_classification_result (Table 5)
--- Purpose: Computes customer revenue Pareto classification (A=70%, B=20%, C=10%).
--- -----------------------------------------------------------------------------
 CREATE PROCEDURE `sp_calculate_customer_abc`()
 BEGIN
     DECLARE v_total_cust_sales DECIMAL(14,2) DEFAULT 0.00;
@@ -961,11 +1423,7 @@ BEGIN
         abc_class      = VALUES(abc_class);
 END //
 
--- -----------------------------------------------------------------------------
 -- PROCEDURE 6: sp_calculate_inventory_turnover (Checklist 4.6)
--- Target Table: inventory_turnover_result (Table 6)
--- Formula: Turnover = COGS / Average Inventory (using actual products.unit_cost)
--- -----------------------------------------------------------------------------
 CREATE PROCEDURE `sp_calculate_inventory_turnover`(
     IN p_start DATE,
     IN p_end DATE
@@ -1001,11 +1459,7 @@ BEGIN
         turnover_ratio = VALUES(turnover_ratio);
 END //
 
--- -----------------------------------------------------------------------------
 -- PROCEDURE 7: sp_calculate_profitability (Checklist 4.7)
--- Target Table: profitability_result (Table 7)
--- Rule: Uses actual products.unit_cost (not assumed percentage) per SRS FR6.5.
--- -----------------------------------------------------------------------------
 CREATE PROCEDURE `sp_calculate_profitability`()
 BEGIN
     INSERT INTO profitability_result (product_id, period_month, revenue, cost, margin_pct)
@@ -1028,11 +1482,7 @@ BEGIN
         margin_pct = VALUES(margin_pct);
 END //
 
--- -----------------------------------------------------------------------------
 -- PROCEDURE 8: sp_calculate_shipment_profitability (Checklist 4.8)
--- Target Table: shipment_profitability_result (Table 8)
--- Purpose: Computes shipment-level gross margin % comparing revenue vs costs.
--- -----------------------------------------------------------------------------
 CREATE PROCEDURE `sp_calculate_shipment_profitability`()
 BEGIN
     INSERT INTO shipment_profitability_result (shipment_id, seller_id, period_month, revenue, cost, margin_pct)
@@ -1066,12 +1516,7 @@ BEGIN
         margin_pct = VALUES(margin_pct);
 END //
 
--- -----------------------------------------------------------------------------
 -- PROCEDURE 9: sp_calculate_profit_loss (Checklist 4.9)
--- Target Table: profit_loss (Table 9)
--- Purpose: Computes revenue, operating costs, and settled claim loss.
--- Note: net_profit is STORED GENERATED and calculated by the database engine.
--- -----------------------------------------------------------------------------
 CREATE PROCEDURE `sp_calculate_profit_loss`()
 BEGIN
     INSERT INTO profit_loss (shipment_id, seller_id, period_month, revenue, freight_cost, port_cost, handling_cost, claim_loss)
@@ -1098,11 +1543,7 @@ BEGIN
         claim_loss    = VALUES(claim_loss);
 END //
 
--- -----------------------------------------------------------------------------
 -- PROCEDURE 10: sp_generate_demand_forecast (Checklist 4.10)
--- Target Table: demand_forecast (Table 10)
--- Purpose: Analyzes historical booking volume to project next month demand & confidence.
--- -----------------------------------------------------------------------------
 CREATE PROCEDURE `sp_generate_demand_forecast`()
 BEGIN
     INSERT INTO demand_forecast (origin_port_id, dest_port_id, container_type, forecast_month, predicted_bookings, confidence_pct, suggested_multiplier)
@@ -1133,11 +1574,7 @@ BEGIN
         suggested_multiplier = VALUES(suggested_multiplier);
 END //
 
--- -----------------------------------------------------------------------------
 -- PROCEDURE 11: sp_apply_forecast_pricing (Checklist 4.11)
--- Purpose: Applies valid suggested demand multipliers (>=75% confidence) to pricing_rules.
--- Note: Trigger trg_after_pricing_rule_update logs this automatically to pricing_audit.
--- -----------------------------------------------------------------------------
 CREATE PROCEDURE `sp_apply_forecast_pricing`()
 BEGIN
     UPDATE pricing_rules pr
@@ -1150,10 +1587,7 @@ BEGIN
       AND pr.is_active = 1;
 END //
 
--- -----------------------------------------------------------------------------
 -- PROCEDURE 12: sp_refresh_all_fr6_analytics (Checklist 4.12 Master Orchestrator)
--- Purpose: Executes all analytics calculations atomically within a single transaction.
--- -----------------------------------------------------------------------------
 CREATE PROCEDURE `sp_refresh_all_fr6_analytics`()
 BEGIN
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
@@ -1179,7 +1613,6 @@ BEGIN
     CALL sp_generate_demand_forecast();
     CALL sp_apply_forecast_pricing();
 
-    -- Mark cache as fresh in staleness tracking
     UPDATE analytics_staleness 
     SET is_stale = 0, last_refreshed_at = NOW(), stale_reason = 'Refreshed successfully'
     WHERE is_stale = 1;
@@ -1187,10 +1620,7 @@ BEGIN
     COMMIT;
 END //
 
--- -----------------------------------------------------------------------------
 -- PROCEDURE 13: sp_purge_historical_analytics_cache (Checklist Section 11)
--- Purpose: Safely purges cached results older than retention limit (default 24 months).
--- -----------------------------------------------------------------------------
 CREATE PROCEDURE `sp_purge_historical_analytics_cache`(
     IN p_months_retention INT
 )
@@ -1213,8 +1643,7 @@ DELIMITER ;
 
 
 -- =============================================================================
--- SECTION 6: OPERATIONAL & AUDITING TRIGGERS (7 TRIGGERS - CHECKLIST 5 & 9)
--- Purpose: Synchronize operational data and maintain immutable audit histories.
+-- STEP 8: OPERATIONAL & AUDITING TRIGGERS (7 TRIGGERS - CHECKLIST 5 & 9)
 -- =============================================================================
 
 DROP TRIGGER IF EXISTS `trg_after_payment_insert`;
@@ -1227,10 +1656,7 @@ DROP TRIGGER IF EXISTS `trg_after_shipment_update_release`;
 
 DELIMITER //
 
--- -----------------------------------------------------------------------------
 -- TRIGGER 1: trg_after_payment_insert (FR5.4)
--- Action: Automatically synchronizes paid_amount and status on billing_invoices.
--- -----------------------------------------------------------------------------
 CREATE TRIGGER `trg_after_payment_insert`
 AFTER INSERT ON `payments`
 FOR EACH ROW
@@ -1244,14 +1670,10 @@ BEGIN
         END
     WHERE invoice_id = NEW.invoice_id;
     
-    -- Flag P&L analytics cache as stale for next dashboard open
     UPDATE analytics_staleness SET is_stale = 1, stale_reason = 'New payment posted' WHERE module_name = 'profit_loss';
 END //
 
--- -----------------------------------------------------------------------------
 -- TRIGGER 2: trg_after_stock_insert_ledger (FR4.5)
--- Action: Creates initial immutable inventory_ledger entry upon stock receipt.
--- -----------------------------------------------------------------------------
 CREATE TRIGGER `trg_after_stock_insert_ledger`
 AFTER INSERT ON `stock`
 FOR EACH ROW
@@ -1260,10 +1682,7 @@ BEGIN
     VALUES (NEW.stock_id, NEW.product_id, 'IN', NEW.quantity, NEW.quantity, 'INITIAL_STOCK', NEW.stock_id, NOW());
 END //
 
--- -----------------------------------------------------------------------------
 -- TRIGGER 3: trg_after_stock_update_ledger (FR4.5)
--- Action: Records IN, OUT, or DAMAGE transactions whenever quantity changes.
--- -----------------------------------------------------------------------------
 CREATE TRIGGER `trg_after_stock_update_ledger`
 AFTER UPDATE ON `stock`
 FOR EACH ROW
@@ -1288,10 +1707,7 @@ BEGIN
     UPDATE analytics_staleness SET is_stale = 1, stale_reason = 'Inventory quantity adjusted' WHERE module_name = 'inventory_turnover';
 END //
 
--- -----------------------------------------------------------------------------
 -- TRIGGER 4: trg_after_claim_status_change (FR7.5)
--- Action: Records historical transition into claim_status_history.
--- -----------------------------------------------------------------------------
 CREATE TRIGGER `trg_after_claim_status_change`
 AFTER UPDATE ON `claims`
 FOR EACH ROW
@@ -1306,10 +1722,7 @@ BEGIN
     END IF;
 END //
 
--- -----------------------------------------------------------------------------
 -- TRIGGER 5: trg_after_pricing_rule_update (FR3.6)
--- Action: Records old vs new rates into pricing_audit.
--- -----------------------------------------------------------------------------
 CREATE TRIGGER `trg_after_pricing_rule_update`
 AFTER UPDATE ON `pricing_rules`
 FOR EACH ROW
@@ -1322,10 +1735,7 @@ BEGIN
     END IF;
 END //
 
--- -----------------------------------------------------------------------------
 -- TRIGGER 6: trg_after_container_movement_insert (FR2.2 / FR2.3)
--- Action: Synchronizes container location & shipment lifecycle status.
--- -----------------------------------------------------------------------------
 CREATE TRIGGER `trg_after_container_movement_insert`
 AFTER INSERT ON `container_movements`
 FOR EACH ROW
@@ -1356,10 +1766,7 @@ BEGIN
     END IF;
 END //
 
--- -----------------------------------------------------------------------------
 -- TRIGGER 7: trg_after_shipment_update_release (FR4.7)
--- Action: Releases or consumes stock reservations upon delivery or cancellation.
--- -----------------------------------------------------------------------------
 CREATE TRIGGER `trg_after_shipment_update_release`
 AFTER UPDATE ON `shipment`
 FOR EACH ROW
@@ -1373,7 +1780,6 @@ BEGIN
         SET status = 'RELEASED'
         WHERE shipment_id = NEW.shipment_id AND status = 'RESERVED';
         
-        -- Restore container to available inventory
         UPDATE containers SET status = 'AVAILABLE' WHERE container_id = NEW.container_id;
     END IF;
 END //
@@ -1382,11 +1788,10 @@ DELIMITER ;
 
 
 -- =============================================================================
--- SECTION 7: COMPLETE CHECKLIST REPORTING QUERIES (7.1 TO 7.11)
--- Purpose: Baseline reporting queries specified in Checklist Section 7.
+-- STEP 9: CHECKLIST BASELINE REPORTING QUERIES (7.1 TO 7.11)
 -- =============================================================================
 
--- 7.1 KPI Aggregation (Active shipments, available containers, revenue, pending invoices, open claims)
+-- 7.1 KPI Aggregation
 SELECT
     (SELECT COUNT(*) FROM shipment WHERE status NOT IN ('CANCELLED', 'DELIVERED')) AS active_shipments,
     (SELECT COUNT(*) FROM containers WHERE status = 'AVAILABLE') AS available_containers,
@@ -1507,10 +1912,10 @@ JOIN ports dp ON df.dest_port_id = dp.port_id;
 
 
 -- =============================================================================
--- SECTION 8: PARAMETERIZED CRUD & MULTI-DIMENSIONAL FILTERS (FR6.8)
--- Purpose: Reference queries for Java PreparedStatement (AnalyticsDAO.java).
+-- STEP 10: PARAMETERIZED CRUD & MULTI-DIMENSIONAL FILTERS (FR6.8)
 -- =============================================================================
 /*
+-- PreparedStatement references for Java AnalyticsDAO.java:
 -- 1. Date Range & Seller Multi-Filter P&L (FR6.8)
 SELECT period_month, seller_id, seller_name, total_shipments_billed, total_gross_revenue,
        total_freight_cost, total_port_cost, total_handling_cost, total_claim_deductions,
@@ -1537,27 +1942,14 @@ WHERE (? IS NULL OR p.product_id = ?)
   AND (? IS NULL OR p.category = ?)
   AND (? IS NULL OR pr.period_month = ?)
 ORDER BY pr.margin_pct DESC;
-
--- 4. Customer ABC Classification Filtered by Category (A, B, C)
-SELECT customer_id, full_name, customer_email, annual_value, cumulative_pct, abc_class, calculated_on
-FROM vw_fr6_abc_customer
-WHERE (? IS NULL OR abc_class = ?)
-ORDER BY annual_value DESC;
-
--- 5. Demand Forecast Filtered by Route & Month
-SELECT origin, destination, container_type, forecast_month, predicted_bookings, confidence_pct, suggested_multiplier
-FROM vw_fr6_demand_forecast_live
-WHERE (? IS NULL OR forecast_month = ?)
-  AND (? IS NULL OR container_type = ?)
-ORDER BY confidence_pct DESC;
 */
 
 
 -- =============================================================================
--- SECTION 9: CACHE REFRESH SCHEDULER & VERIFICATION SUITE (CHECKLIST 11 & 12)
+-- STEP 11: REFRESH SCHEDULER & COMPREHENSIVE VERIFICATION SUITE
 -- =============================================================================
 
--- Scheduled Event for daily background analytics recalculation (Midnight daily)
+-- Daily background refresh event (Midnight)
 DROP EVENT IF EXISTS `evt_daily_fr6_analytics_refresh`;
 DELIMITER //
 CREATE EVENT IF NOT EXISTS `evt_daily_fr6_analytics_refresh`
@@ -1570,11 +1962,11 @@ END //
 DELIMITER ;
 
 -- =============================================================================
--- EXECUTE INITIAL POPULATION & VERIFY (CHECKLIST SECTION 12)
+-- EXECUTE MASTER CALCULATION & VERIFY ON DUMMY DATABASE
 -- =============================================================================
 CALL sp_refresh_all_fr6_analytics();
 
--- Display Verification Counts across all 10 result tables
+-- Display Verification Summary Table across all 10 Analytics Tables in n_logistic_dummy_db
 SELECT 'sales_trend_result' AS table_name, COUNT(*) AS row_count FROM sales_trend_result
 UNION ALL
 SELECT 'sales_trend_product_result', COUNT(*) FROM sales_trend_product_result
